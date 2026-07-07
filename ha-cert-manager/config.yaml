@@ -16,7 +16,7 @@ panel_title: Cert Manager
 options: {}
 schema: {}
 
-image: ghcr.io/tinmansc/ha-cert-manager:{version}
+image: ghcr.io/tinmansc/ha-cert-manager
 
 map:
   - ssl:ro
