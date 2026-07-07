@@ -18,7 +18,7 @@ A Home Assistant add-on that deploys your Let's Encrypt certificate to every dev
 |--------|-------------|
 | TrueNAS CORE / CE / Enterprise | API key |
 | pfSense | Username + password |
-| HP Switch 1950 Series (Comware) | SSH + XTD CLI |
+| HP Switch 1950 Series (Comware 7 only) | SSH + XTD CLI |
 | Hubitat C-7 | API key |
 | TP-Link Omada OC200 / OC300 | Username + password |
 | Brother MFC Printer | Web UI password |
