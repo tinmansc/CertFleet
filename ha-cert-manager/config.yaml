@@ -1,6 +1,6 @@
 name: "HA Cert Manager"
 description: "Unified Let's Encrypt certificate deployment dashboard for all your network devices."
-version: "1.0.12"
+version: "1.0.13"
 slug: "ha_cert_manager"
 init: false
 arch:

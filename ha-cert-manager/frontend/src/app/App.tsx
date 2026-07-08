@@ -1321,6 +1321,20 @@ export default function App() {
             <span className="hidden sm:inline font-mono text-[14px] text-[#8b949e]">Let's Encrypt → All Devices</span>
           </div>
           <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[12px] text-[#484f58] tracking-widest">v{appVersion ?? APP_VERSION_FALLBACK}</span>
+              {updateAvailable && (
+                <a
+                  href="/hassio/addon/ha_cert_manager/info"
+                  target="_parent"
+                  title={latestVersion ? `v${latestVersion} available` : "Update available"}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-[#9e6a03]/20 border border-[#9e6a03]/40 text-[#e3b341] hover:bg-[#9e6a03]/30 transition-colors"
+                >
+                  <Zap size={10} />
+                  {latestVersion ? `v${latestVersion}` : "Update"}
+                </a>
+              )}
+            </div>
             {devices.length > 0 && (
               <div className="hidden md:flex items-center gap-3 font-mono text-[14px]">
                 <span className="text-[#39d353]">{syncedCount}/{devices.length} in sync</span>
@@ -1439,20 +1453,6 @@ export default function App() {
               </div>
 
               <div className="flex flex-col items-end gap-1.5 shrink-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[12px] text-[#484f58] tracking-widest">v{appVersion ?? APP_VERSION_FALLBACK}</span>
-                  {updateAvailable && (
-                    <a
-                      href="/hassio/addon/ha_cert_manager/info"
-                      target="_parent"
-                      title={latestVersion ? `v${latestVersion} available` : "Update available"}
-                      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-[#9e6a03]/20 border border-[#9e6a03]/40 text-[#e3b341] hover:bg-[#9e6a03]/30 transition-colors"
-                    >
-                      <Zap size={10} />
-                      {latestVersion ? `v${latestVersion}` : "Update"}
-                    </a>
-                  )}
-                </div>
                 <div className="flex items-center gap-2">
                   <button onClick={handleRefreshCert}
                     title="Refresh Local Cert Info"

@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.13] — 2026-07-08
+
+### Fixed
+- **Version badge and update-available indicator disappeared whenever there was no valid local certificate** — both lived inside the cert banner's "certificate successfully loaded" branch only, so on any install without a readable cert (including a fresh install, before Let's Encrypt has issued anything) they never rendered at all. Moved both into the persistent header next to the polling indicator, where they're always visible regardless of cert state.
+
+---
+
 ## [1.0.12] — 2026-07-08
 
 ### Added
