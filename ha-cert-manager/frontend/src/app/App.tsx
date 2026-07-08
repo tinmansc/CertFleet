@@ -922,7 +922,7 @@ export default function App() {
             <button onClick={() => setPolling(p => !p)}
               className={`flex items-center gap-1.5 text-[14px] font-mono transition-colors ${polling ? "text-[#39d353] hover:text-[#39d353]/70" : "text-[#8b949e] hover:text-[#c9d1d9]"}`}>
               {polling ? <Wifi size={13} /> : <WifiOff size={13} />}
-              {polling ? "polling" : "paused"}
+              {polling ? (certError ? "waiting" : "polling") : "paused"}
             </button>
             {/* Settings gear */}
             <div className="relative" ref={settingsRef}>
@@ -953,23 +953,35 @@ export default function App() {
         {/* ── Cert Banner ─────────────────────────────────────────────── */}
         <section className="rounded border border-[#21262d] bg-card p-5">
           {certError ? (
-            <div className="flex items-start gap-3">
-              <div className="p-2 rounded border border-[#f85149]/30 bg-[#f85149]/10 shrink-0">
-                <FileWarning size={20} className="text-[#f85149]" />
+            devices.length === 0 ? (
+              /* No cert + no devices: soft placeholder — Getting Started below has the details */
+              <div className="flex items-center gap-3 text-[#484f58]">
+                <FolderOpen size={18} />
+                <span className="font-mono text-[14px]">No certificate loaded — follow the steps below to get started.</span>
+                <button onClick={handleRefreshCert} title="Check again"
+                  className={`ml-auto p-1.5 rounded border transition-all duration-500 ${certFlash ? "border-[#39d353] bg-[#39d353]/20 text-[#39d353]" : "border-[#30363d] text-[#484f58] hover:text-[#c9d1d9] hover:border-[#8b949e]"}`}>
+                  <RefreshCw size={13} className={certFlash ? "animate-spin" : ""} />
+                </button>
               </div>
-              <div className="flex-1">
-                <p className="text-[16px] font-semibold text-[#f85149] mb-1">Certificate file error</p>
-                <p className="font-mono text-[14px] text-[#c9d1d9] whitespace-pre-wrap leading-relaxed">{certError}</p>
-                <p className="font-mono text-[14px] text-[#484f58] mt-2">
-                  Check the cert paths in <button onClick={() => setShowSettings(true)} className="text-[#58a6ff] hover:underline">Settings</button>.
-                </p>
+            ) : (
+              /* No cert but devices exist: show the actionable error */
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded border border-[#f85149]/30 bg-[#f85149]/10 shrink-0">
+                  <FileWarning size={20} className="text-[#f85149]" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-[16px] font-semibold text-[#f85149] mb-1">Certificate file error</p>
+                  <p className="font-mono text-[14px] text-[#c9d1d9] whitespace-pre-wrap leading-relaxed">{certError}</p>
+                  <p className="font-mono text-[14px] text-[#484f58] mt-2">
+                    Check the cert paths in <button onClick={() => setShowSettings(true)} className="text-[#58a6ff] hover:underline">Settings</button>.
+                  </p>
+                </div>
+                <button onClick={handleRefreshCert} title="Refresh Local Cert Info"
+                  className={`p-1.5 rounded border transition-all duration-500 shrink-0 ${certFlash ? "border-[#39d353] bg-[#39d353]/20 text-[#39d353]" : "border-[#30363d] text-[#484f58] hover:text-[#c9d1d9] hover:border-[#8b949e]"}`}>
+                  <RefreshCw size={13} className={certFlash ? "animate-spin" : ""} />
+                </button>
               </div>
-              <button onClick={handleRefreshCert}
-                title="Refresh Local Cert Info"
-                className={`p-1.5 rounded border transition-all duration-500 shrink-0 ${certFlash ? "border-[#39d353] bg-[#39d353]/20 text-[#39d353]" : "border-[#30363d] text-[#484f58] hover:text-[#c9d1d9] hover:border-[#8b949e]"}`}>
-                <RefreshCw size={13} className={certFlash ? "animate-spin" : ""} />
-              </button>
-            </div>
+            )
           ) : (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-start gap-4">
@@ -1099,9 +1111,9 @@ export default function App() {
                   {cert ? "✓" : "!"}
                 </div>
                 <div>
-                  <p className="font-mono text-[14px] text-[#e6edf3] mb-0.5">Certificate detected</p>
+                  <p className="font-mono text-[14px] text-[#e6edf3] mb-0.5">{cert ? "Certificate detected" : "Install Let's Encrypt"}</p>
                   {cert
-                    ? <p className="font-mono text-[13px] text-[#8b949e]">{cert.subject} — {cert.days_remaining} days remaining</p>
+                    ? <p className="font-mono text-[13px] text-[#8b949e]">{cert.domain} — {cert.days_remaining} days remaining</p>
                     : <p className="font-mono text-[13px] text-[#f85149]">No cert found at <span className="text-[#e6edf3]">/ssl/fullchain.pem</span>. Ensure Let's Encrypt is configured in Home Assistant.</p>
                   }
                 </div>
