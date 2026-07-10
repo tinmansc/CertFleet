@@ -33,6 +33,11 @@ export default defineConfig({
       '/api': 'http://localhost:8099',
     },
   },
+  preview: {
+    proxy: {
+      '/api': 'http://localhost:8099',
+    },
+  },
   base: './',
   build: {
     outDir: 'dist',

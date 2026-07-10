@@ -10,7 +10,10 @@ Run through this before every version bump and push to main.
 - [ ] No hardcoded IP addresses, passwords, or test credentials left in code
 
 ## 2. Version bump
-- [ ] `config.yaml` → `version:` incremented (semver: patch for fixes, minor for new devices/features)
+- [ ] `config.yaml` → `version:` incremented (semver: patch for fixes AND small additive checks/features
+      like a new warning or log line; minor reserved for an actual new device type or a user-facing
+      workflow change. Default to patch when in doubt — small bumps are cheap and easy to follow in the
+      changelog, a bloated minor version isn't.)
 - [ ] `CHANGELOG.md` updated with the new version, date, and bullet points for every change
 - [ ] Grep for stray hardcoded version strings before pushing: `grep -rn '"1\.0\.' frontend/src backend --include=*.tsx --include=*.py`
   (the UI version badge reads live from the Supervisor via `/api/supervisor/addon-info` — it should never need editing again, but check anyway in case a new hardcoded copy creeps in)
@@ -114,6 +117,18 @@ kind that quietly destroys trust rather than throwing an obvious error.
       frontend's `clearedBeforeId` boundary (see `App.tsx`) is still being
       respected. If you touch the SSE handler or the log buffer, re-check
       this by hand: clear, wait >5s, confirm nothing comes back.
+- [ ] **Unattended operation actually runs unattended.** Anything the user would
+      reasonably expect to work with no one looking at the dashboard —
+      auto-deploy-on-renewal, cert-health polling, and every notification
+      (unreadable cert, decryption-key problems, encryption key
+      rotation/export/import, staging-cert detection, anything else framed as
+      "we'll warn you if X breaks") — must be driven from the backend, not
+      from a `useEffect`/`setInterval` in `App.tsx` that only runs while a
+      browser tab has the page open. A CertFleet instance sitting untouched
+      on a shelf is a real, expected deployment mode, not an edge case — if a
+      feature's trigger lives only in frontend React state, it silently does
+      nothing for that user and they will not know. Check any new "we detect
+      and warn about X" feature against this before shipping it.
 
 ---
 
@@ -132,3 +147,4 @@ kind that quietly destroys trust rather than throwing an obvious error.
 > - The first version of the cert-coverage check (1.2.0) only read DNS-name SANs off a device's live certificate, missing IP-address SANs entirely — would have produced a false "not covered" warning on any device configured by IP whose self-signed cert includes that same IP as a SAN, which is a common pattern (caught by testing against the real Proxmox box, which does exactly this).
 > - `TYPE_FIELDS.hubitat` in `App.tsx` asked for an "API key" — but `hubitat.py` has only ever authenticated with username/password against the hub's web login. Any Hubitat device added through the GUI silently got empty username/password and a never-used API key field; nothing surfaced an error, it just quietly authenticated with blank credentials. Caught by the user noticing the Add Device form didn't match what they remembered configuring. Fixed by correcting `TYPE_FIELDS` to match the real backend, verified live in browser afterward. Lesson: when a device's auth mechanism is ever changed, check BOTH sides — it's easy for one to drift without any error, since empty-string credentials don't throw, they just fail (or worse, quietly no-op) downstream.
 > - `/api/events`'s SSE endpoint replays the entire `_log_buffer` on every new connection — which is correct and necessary for a client that just opened the page, but means the browser's automatic `EventSource` reconnect (fires a few seconds after any network hiccup) silently replays history that a user had just clicked "clear" on, since clear only ever touched local React state. Fixed by tracking a `clearedBeforeId` boundary client-side and filtering replayed/new entries against it, plus dropping a real "Event log cleared" marker into the log so the boundary is visible.
+> - **Auto-deploy-on-renewal and the "certificate unreadable" HA notification both only ever ran from a `setInterval` inside `App.tsx`'s React component** — meaning both silently did nothing at all on any CertFleet instance where nobody had the dashboard open in a browser. Found while designing staging/test-cert detection: a staging cert issued on an unattended system with Auto-deploy enabled would have needed someone watching a browser tab for the "don't push this to real devices" safety logic to even run in the first place. Not yet fixed as of 1.3.0 — the fix is to move renewal-detection and its consequences (auto-deploy, notifications) into the same server-side hook `_note_cert_if_changed()` (`main.py`, added in 1.3.0 for logging) already established, so they fire on every backend poll tick regardless of whether a browser is open. See the new "Unattended operation actually runs unattended" standing check above.

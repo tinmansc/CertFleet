@@ -70,14 +70,15 @@ def _make_logger(device_id: str) -> Logger:
 _last_cert_fingerprint: str | None = None
 
 
-def _note_cert_if_changed(local) -> None:
+def _note_cert_if_changed(local) -> bool:
     """Log serial + SHA256 once at startup and again whenever the fingerprint
     changes, so a renewal is visible in the event log even if no one has the
-    dashboard open when it happens — /api/cert is polled often enough
-    (frontend + this) that a real renewal is caught within one interval."""
+    dashboard open when it happens. Returns True only for a genuine renewal
+    (not the first-time detection at startup) — callers use this to decide
+    whether to trigger auto-deploy/check."""
     global _last_cert_fingerprint
     if local is None or local.fingerprint == _last_cert_fingerprint:
-        return
+        return False
     first_time = _last_cert_fingerprint is None
     _last_cert_fingerprint = local.fingerprint
     _emit(
@@ -85,6 +86,132 @@ def _note_cert_if_changed(local) -> None:
         f"{'Certificate detected' if first_time else 'Certificate changed'}: "
         f"{local.domain} — serial {local.serial}, SHA256 {local.fingerprint}",
     )
+    return not first_time
+
+
+# ── Staging/test certificate tracking ─────────────────────────────────────────
+
+STAGING_NOTIFY_INTERVAL_SECONDS = 24 * 60 * 60
+_staging_active = False
+_staging_last_notified: datetime | None = None
+
+
+def _check_staging(local, notify_enabled: bool) -> None:
+    """Runs every poll tick (independent of whether the cert just changed) so
+    a staging cert that sits loaded for days keeps getting flagged, not just
+    once at the moment it first appeared — this is meant to reach someone who
+    only glances at HA notifications occasionally, not just an open tab."""
+    global _staging_active, _staging_last_notified
+    if local is None:
+        return
+    now = datetime.now(timezone.utc)
+    if local.is_staging:
+        due = _staging_last_notified is None or \
+            (now - _staging_last_notified).total_seconds() >= STAGING_NOTIFY_INTERVAL_SECONDS
+        if due:
+            _emit("warn", f"Test/staging certificate detected at {local.cert_path} — "
+                           f"auto-deploy is paused until a valid certificate is issued")
+            if notify_enabled:
+                notify.notify_ha(
+                    "CertFleet — test/staging certificate active",
+                    f"A Let's Encrypt STAGING (untrusted) certificate is currently loaded at "
+                    f"{local.cert_path}. Auto-deploy is paused — devices will not receive this "
+                    f"certificate until a valid one is issued.",
+                    notification_id="certfleet_staging",
+                )
+            _staging_last_notified = now
+        _staging_active = True
+    else:
+        if _staging_active:
+            _emit("success", f"Valid certificate restored at {local.cert_path} — "
+                               f"auto-deploy has resumed normal operation")
+            if notify_enabled:
+                notify.notify_ha(
+                    "CertFleet — valid certificate restored",
+                    f"The certificate at {local.cert_path} is no longer a staging/test "
+                    f"certificate. Auto-deploy has resumed normal operation.",
+                    notification_id="certfleet_staging",
+                )
+        _staging_active = False
+        _staging_last_notified = None
+
+
+# ── Server-side poll loop ─────────────────────────────────────────────────────
+# Auto-deploy, cert-change detection, and the notifications below previously
+# only ran from a setInterval in the React frontend — meaning a CertFleet
+# instance with no browser tab open did none of this. This loop is the fix:
+# it runs for as long as the backend process is alive, regardless of the UI.
+
+CERT_FAIL_NOTIFY_THRESHOLD = 3
+DEFAULT_POLL_INTERVAL_MS = 900_000  # 15 min — matches the frontend's own default
+_cert_fail_streak = 0
+_cert_fail_notified = False
+_poller_task: asyncio.Task | None = None
+
+
+async def _poll_tick() -> None:
+    global _cert_fail_streak, _cert_fail_notified
+    from cert_reader import DEFAULT_CERT_PATH, DEFAULT_KEY_PATH  # noqa: PLC0415
+
+    cfg = crypto_store.load_config(logger=_emit)
+    notify_enabled = cfg.get("notify_enabled", True)
+    cert_path = cfg.get("cert_path") or DEFAULT_CERT_PATH
+    key_path = cfg.get("key_path") or DEFAULT_KEY_PATH
+
+    try:
+        local = read_local_cert(cert_path, key_path)
+    except Exception:
+        _cert_fail_streak += 1
+        if _cert_fail_streak == CERT_FAIL_NOTIFY_THRESHOLD and not _cert_fail_notified:
+            _cert_fail_notified = True
+            _emit("warn", f"Certificate unreadable for {CERT_FAIL_NOTIFY_THRESHOLD} consecutive checks "
+                           f"({cert_path})")
+            if notify_enabled:
+                notify.notify_ha(
+                    "CertFleet — certificate unreadable",
+                    f"The local certificate file has failed to read for {CERT_FAIL_NOTIFY_THRESHOLD} "
+                    "consecutive checks. Check the cert paths in Settings.",
+                    notification_id="certfleet_cert_error",
+                )
+        return
+
+    _cert_fail_streak = 0
+    if _cert_fail_notified:
+        _cert_fail_notified = False
+        _emit("info", "Certificate readable again after a period of failure")
+        if notify_enabled:
+            notify.notify_ha(
+                "CertFleet — certificate readable again",
+                "The local certificate file is readable again after a period of failure.",
+                notification_id="certfleet_cert_error",
+            )
+
+    changed = _note_cert_if_changed(local)
+    _check_staging(local, notify_enabled)
+
+    if not changed:
+        return
+
+    if local.is_staging:
+        await check_all(auto=True)
+    elif cfg.get("auto_deploy_on_renewal", False):
+        await deploy_all(auto=True)
+    else:
+        await check_all(auto=True)
+
+
+async def _poll_loop() -> None:
+    while True:
+        try:
+            await _poll_tick()
+        except Exception as exc:
+            _emit("error", f"Poll loop error: {exc}")
+        try:
+            cfg = crypto_store.load_config()
+            interval_ms = cfg.get("poll_interval_ms") or DEFAULT_POLL_INTERVAL_MS
+        except Exception:
+            interval_ms = DEFAULT_POLL_INTERVAL_MS
+        await asyncio.sleep(max(interval_ms, 5_000) / 1000)
 
 
 # ── Device status cache ───────────────────────────────────────────────────────
@@ -143,15 +270,15 @@ async def lifespan(app: FastAPI):
         _emit("error", f"Could not decrypt device configuration: {exc}. "
                         "Use Settings → Encryption Key to restore or reset the key.")
     _emit("info", "CertFleet started")
-    try:
-        from cert_reader import DEFAULT_CERT_PATH, DEFAULT_KEY_PATH  # noqa: PLC0415
-        cfg = crypto_store.load_config()
-        cert_path = cfg.get("cert_path") or DEFAULT_CERT_PATH
-        key_path  = cfg.get("key_path")  or DEFAULT_KEY_PATH
-        _note_cert_if_changed(read_local_cert(cert_path, key_path))
-    except Exception:
-        pass  # /api/cert will report the real error to the UI; startup shouldn't crash on it
+    global _poller_task
+    _poller_task = asyncio.create_task(_poll_loop())
     yield
+    if _poller_task:
+        _poller_task.cancel()
+        try:
+            await _poller_task
+        except asyncio.CancelledError:
+            pass
     _emit("info", "CertFleet shutting down")
 
 
@@ -280,7 +407,6 @@ def get_cert():
         cert_path = cfg.get("cert_path") or DEFAULT_CERT_PATH
         key_path  = cfg.get("key_path")  or DEFAULT_KEY_PATH
         local = read_local_cert(cert_path, key_path)
-        _note_cert_if_changed(local)
         return asdict(local)
     except crypto_store.DecryptionError as e:
         raise HTTPException(409, f"Could not decrypt device configuration: {e}")

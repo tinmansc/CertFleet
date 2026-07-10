@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.1] — 2026-07-10 — "the vibe coding apocalypse where Dave realized he should ask more questions"
+
+### Added
+- **Staging/test Let's Encrypt certificate detection** (`is_staging` on `LocalCert`, `cert_reader.py`) — keyed off Let's Encrypt's own `"STAGING"` branding in the issuer/root CA CN, confirmed against real staging-issued certs. The top certificate card now turns amber when a staging cert is loaded, or red specifically when Auto-deploy is also on (the genuinely dangerous combination — a cert that would otherwise have been auto-pushed to every device). The Issuer and Root CA fields that tipped this off are recolored to match.
+- **Auto-deploy now self-pauses on a staging cert**, gated live off `autoDeployOnRenewal AND NOT is_staging` — no separate "suspended" flag to persist or restore; it re-enables itself automatically the moment a real certificate replaces the staging one.
+- **Manual Deploy (single device or Deploy All) now requires confirmation** when the loaded certificate is staging — Verify/Check remain unrestricted since they're read-only.
+- **HA notification when a staging cert is detected**, repeating every 24h for as long as it persists (not just once) so a system nobody's actively watching doesn't have this buried after one missed alert — plus a "valid certificate restored" notification once resolved.
+
+### Fixed
+- **Auto-deploy-on-renewal, the cert-unreadable notification, and now staging-cert handling all now run server-side**, via a new backend poll loop in `main.py` (`_poll_loop`/`_poll_tick`) that runs for as long as the process is alive. Previously, every one of these lived only in a `setInterval` inside the React frontend — meaning a CertFleet instance with no browser tab open silently did none of it. This was found while designing staging-cert detection and is exactly the "sitting on a shelf, nobody's watching" scenario auto-deploy and notifications exist for in the first place. See the new "Unattended operation actually runs unattended" standing check in `RELEASE_CHECKLIST.md`.
+- **`auto_deploy_on_renewal` moved from browser `localStorage` to the backend config** (`/api/config`) — it has to be readable server-side for the poll loop above to act on it, and `notify_enabled`/`poll_interval_ms` already worked this way.
+
+---
+
 ## [1.3.0] — 2026-07-10
 
 ### Added

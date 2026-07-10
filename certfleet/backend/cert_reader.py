@@ -35,6 +35,7 @@ class LocalCert:
     sans: list[str]           # Subject Alternative Names
     root_ca: str              # CN of last cert in chain (trust anchor)
     key_usage: str            # e.g. "Digital Signature, Key Encipherment"
+    is_staging: bool          # True if issued by Let's Encrypt's staging environment
 
 
 def _load_chain(path: Path) -> list[x509.Certificate]:
@@ -185,6 +186,12 @@ def read_local_cert(
     issuer_attrs = cert.issuer.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
     issuer = issuer_attrs[0].value if issuer_attrs else "unknown"
 
+    root_ca = _root_ca(chain)
+    # Let's Encrypt deliberately brands every staging-environment CA name
+    # with "(STAGING)" (e.g. "(STAGING) Pretend Pear X1") specifically so
+    # this is detectable — confirmed against real staging-issued certs.
+    is_staging = "staging" in issuer.lower() or "staging" in root_ca.lower()
+
     return LocalCert(
         domain=domain,
         issuer=issuer,
@@ -199,8 +206,9 @@ def read_local_cert(
         key_info=_key_info(cert),
         sig_algorithm=_sig_algorithm(cert),
         sans=_sans(cert),
-        root_ca=_root_ca(chain),
+        root_ca=root_ca,
         key_usage=_key_usage(cert),
+        is_staging=is_staging,
     )
 
 

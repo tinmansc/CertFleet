@@ -16,7 +16,7 @@ interface LocalCert {
   days_remaining: number; fingerprint: string; serial: string;
   cert_path: string; key_path: string; last_checked: string;
   key_info: string; sig_algorithm: string; sans: string[];
-  root_ca: string; key_usage: string;
+  root_ca: string; key_usage: string; is_staging: boolean;
 }
 
 interface Device {
@@ -43,6 +43,7 @@ interface AppConfig {
   key_path?: string;
   notify_enabled?: boolean;
   poll_interval_ms?: number;
+  auto_deploy_on_renewal?: boolean;
 }
 
 interface BackupState { status: "idle"|"running"|"done"|"error"; filename?: string; error?: string; }
@@ -101,12 +102,6 @@ const POLL_INTERVALS: { label: string; value: number }[] = [
 // Let's Encrypt certs are valid ~60-90 days — nothing here needs sub-minute
 // freshness, so default to a calmer cadence than the old hardcoded 60s.
 const DEFAULT_POLL_INTERVAL_MS = 900_000; // 15 min
-
-// A poll failure this many times in a row (not time-based — scales
-// naturally with whatever interval the user picked above) triggers a
-// single HA notification, with a matching "recovered" notification once
-// reads succeed again. Avoids alerting on a single transient blip.
-const CERT_FAIL_NOTIFY_THRESHOLD = 3;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -498,7 +493,7 @@ function SettingsPanel({
   bgColor: string; onBgColor: (c: string) => void;
   certPath: string; keyPath: string;
   onSavePaths: (cert: string, key: string) => Promise<boolean>;
-  autoDeployOnRenewal: boolean; onAutoDeployToggle: (v: boolean) => void;
+  autoDeployOnRenewal: boolean; onAutoDeployToggle: (v: boolean) => Promise<boolean>;
   notifyEnabled: boolean; onNotifyToggle: (v: boolean) => Promise<boolean>;
   pollIntervalMs: number; onPollIntervalChange: (ms: number) => Promise<boolean>;
   appVersion: string | null;
@@ -594,7 +589,7 @@ function SettingsPanel({
         <label className="flex items-center justify-between gap-3 cursor-pointer group">
           <div>
             <p className="font-mono text-[13px] text-[#e6edf3]">Auto-deploy on renewal</p>
-            <p className="font-mono text-[11px] text-[#484f58] mt-0.5">Deploy all devices when the cert serial changes</p>
+            <p className="font-mono text-[11px] text-[#484f58] mt-0.5">Deploy all devices when the cert serial changes. Runs server-side, so it works even with this dashboard closed. Automatically paused if a Let's Encrypt staging/test certificate is detected.</p>
           </div>
           <button
             onClick={() => onAutoDeployToggle(!autoDeployOnRenewal)}
@@ -1119,9 +1114,10 @@ export default function App() {
   const [bgColor, setBgColor]           = useState(() => localStorage.getItem("ha-cert-bg") || "#0d1117");
   const [certPath, setCertPath]         = useState(DEFAULT_CERT_PATH);
   const [keyPath,  setKeyPath]          = useState(DEFAULT_KEY_PATH);
-  const [autoDeployOnRenewal, setAutoDeployOnRenewal] = useState(
-    () => localStorage.getItem("ha-cert-autodeploy") === "true"
-  );
+  // Persisted server-side (auto_deploy_on_renewal in /api/config) rather than
+  // localStorage — the backend poll loop is what actually acts on this
+  // setting now, and it has no access to the browser's localStorage.
+  const [autoDeployOnRenewal, setAutoDeployOnRenewal] = useState(false);
   const [notifyEnabled,   setNotifyEnabled]   = useState(true);
   const [pollIntervalMs,  setPollIntervalMs]  = useState(DEFAULT_POLL_INTERVAL_MS);
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -1129,10 +1125,6 @@ export default function App() {
   const [appVersion,      setAppVersion]      = useState<string | null>(null);
   const [configError,     setConfigError]     = useState<string | null>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
-  const prevCertSerial   = useRef<string | null>(null);
-  const certSerialInited = useRef(false);
-  const certFailStreak   = useRef(0);
-  const certFailNotified = useRef(false);
 
   // Refresh button flash
   const [certFlash, setCertFlash] = useState(false);
@@ -1173,6 +1165,7 @@ export default function App() {
         if (data.key_path)  setKeyPath(data.key_path);
         setNotifyEnabled(data.notify_enabled ?? true);
         setPollIntervalMs(data.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS);
+        setAutoDeployOnRenewal(data.auto_deploy_on_renewal ?? false);
         setConfigError(null);
       })
       .catch(e => { if (String(e).includes("decrypt")) setConfigError(String(e)); });
@@ -1204,6 +1197,13 @@ export default function App() {
     setNotifyEnabled(v);
     const ok = await saveConfig({ notify_enabled: v });
     if (!ok) setNotifyEnabled(!v); // roll back the optimistic UI update on a real failure
+    return ok;
+  }, [saveConfig]);
+
+  const handleAutoDeployToggle = useCallback(async (v: boolean): Promise<boolean> => {
+    setAutoDeployOnRenewal(v);
+    const ok = await saveConfig({ auto_deploy_on_renewal: v });
+    if (!ok) setAutoDeployOnRenewal(!v);
     return ok;
   }, [saveConfig]);
 
@@ -1257,6 +1257,10 @@ export default function App() {
       .catch(() => null);
   }, []);
 
+  // Display refresh only — renewal detection, auto-deploy, cert-unreadable
+  // tracking, and staging-cert handling all run server-side now (main.py's
+  // poll loop), independent of whether this tab is even open. This effect
+  // just keeps what's on screen current.
   useEffect(() => {
     if (!polling) return;
     const id = setInterval(async () => {
@@ -1266,59 +1270,11 @@ export default function App() {
       setPollTickFlash(true);
       setTimeout(() => setPollTickFlash(false), 700);
       const res = await fetch("./api/cert").catch(() => null);
-      if (res?.ok) {
-        certFailStreak.current = 0;
-        if (certFailNotified.current) {
-          // Was failing long enough to notify, now reading fine again — close the loop.
-          certFailNotified.current = false;
-          if (notifyEnabled) {
-            fetch("./api/notify", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                title: "CertFleet — certificate readable again",
-                message: "The local certificate file is readable again after a period of failure.",
-                notification_id: "certfleet_cert_error",
-              }),
-            }).catch(() => null);
-          }
-        }
-        const data: LocalCert = await res.json();
-        setCert(data);
-        if (!certSerialInited.current) {
-          prevCertSerial.current = data.serial;
-          certSerialInited.current = true;
-        } else if (prevCertSerial.current && data.serial !== prevCertSerial.current) {
-          prevCertSerial.current = data.serial;
-          if (autoDeployOnRenewal) {
-            fetch("./api/devices/deploy-all?auto=true", { method: "POST" }).catch(() => null);
-          } else {
-            // Cert renewed but auto-deploy is off — run check-all so devices flip to NEEDS_DEPLOY
-            fetch("./api/devices/check-all?auto=true", { method: "POST" }).catch(() => null);
-          }
-        }
-      } else {
-        certFailStreak.current += 1;
-        if (certFailStreak.current === CERT_FAIL_NOTIFY_THRESHOLD && !certFailNotified.current) {
-          certFailNotified.current = true;
-          if (notifyEnabled) {
-            fetch("./api/notify", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                title: "CertFleet — certificate unreadable",
-                message: `The local certificate file has failed to read for ${CERT_FAIL_NOTIFY_THRESHOLD} `
-                  + "consecutive checks. Check the cert paths in Settings.",
-                notification_id: "certfleet_cert_error",
-              }),
-            }).catch(() => null);
-          }
-        }
-      }
+      if (res?.ok) setCert(await res.json());
       fetchDevices();
     }, pollIntervalMs);
     return () => clearInterval(id);
-  }, [polling, fetchDevices, autoDeployOnRenewal, notifyEnabled, pollIntervalMs]);
+  }, [polling, fetchDevices, pollIntervalMs]);
 
   const handleAddDevice = useCallback((d: DeviceConfigEntry) => {
     setShowModal(false);
@@ -1345,11 +1301,15 @@ export default function App() {
   }, [configDevices, saveConfig]);
 
   const callDevice = useCallback(async (id: string, action: "check" | "deploy") => {
+    if (action === "deploy" && cert?.is_staging && !window.confirm(
+      "The certificate currently loaded is a Let's Encrypt STAGING (untrusted, test) certificate, "
+      + "not a real one.\n\nDeploy it to this device anyway?"
+    )) return;
     setDevices(prev => prev.map(d => d.id === id ? { ...d, running: true } : d));
     try { await fetch(`./api/devices/${id}/${action}`, { method: "POST" }); }
     catch (e) { console.error(e); }
     fetchDevices();
-  }, [fetchDevices]);
+  }, [fetchDevices, cert]);
 
   const callBackup = useCallback(async (id: string) => {
     setBackupStates(prev => ({ ...prev, [id]: { status: "running" } }));
@@ -1364,12 +1324,17 @@ export default function App() {
   }, []);
 
   const deployAll = useCallback(async () => {
+    if (cert?.is_staging && !window.confirm(
+      "The certificate currently loaded is a Let's Encrypt STAGING (untrusted, test) certificate, "
+      + "not a real one. Deploying it will push an untrusted certificate to every enabled device.\n\n"
+      + "Deploy anyway?"
+    )) return;
     setDeployingAll(true);
     try { await fetch("./api/devices/deploy-all", { method: "POST" }); }
     catch (e) { console.error(e); }
     await fetchDevices();
     setDeployingAll(false);
-  }, [fetchDevices]);
+  }, [fetchDevices, cert]);
 
   const verifyAll = useCallback(async () => {
     setVerifyingAll(true);
@@ -1380,8 +1345,14 @@ export default function App() {
   }, [fetchDevices]);
 
   const configById = Object.fromEntries(configDevices.map(d => [d.id, d]));
-  const certDays   = cert?.days_remaining ?? 0;
-  const certStatus = certDays <= 14 ? "error" : certDays <= 30 ? "warn" : "ok";
+  const certDays    = cert?.days_remaining ?? 0;
+  const isStaging   = cert?.is_staging ?? false;
+  // A staging cert that WOULD have been auto-deployed is the dangerous
+  // combination — that's a hard red, not just an informational yellow.
+  const stagingDangerous = isStaging && autoDeployOnRenewal;
+  const certStatus  = certDays <= 14 || stagingDangerous ? "error"
+    : isStaging || certDays <= 30 ? "warn"
+    : "ok";
   const localFp     = cert?.fingerprint ?? null;
   const syncedCount = devices.filter(d =>
     d.last_status === "already_current" ||
@@ -1453,10 +1424,7 @@ export default function App() {
                   certPath={certPath} keyPath={keyPath}
                   onSavePaths={handleSavePaths}
                   autoDeployOnRenewal={autoDeployOnRenewal}
-                  onAutoDeployToggle={v => {
-                    setAutoDeployOnRenewal(v);
-                    localStorage.setItem("ha-cert-autodeploy", String(v));
-                  }}
+                  onAutoDeployToggle={handleAutoDeployToggle}
                   notifyEnabled={notifyEnabled} onNotifyToggle={handleNotifyToggle}
                   pollIntervalMs={pollIntervalMs} onPollIntervalChange={handlePollIntervalChange}
                   appVersion={appVersion}
@@ -1532,7 +1500,7 @@ export default function App() {
                   {cert && (
                     <>
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5">
-                        <span className="font-mono text-[14px] text-[#8b949e]">Issuer: {cert.issuer}</span>
+                        <span className={`font-mono text-[14px] ${cert.is_staging ? "text-[#e3b341]" : "text-[#8b949e]"}`}>Issuer: {cert.issuer}</span>
                         <span className="font-mono text-[14px] text-[#8b949e]">Expires {cert.not_after.substring(0, 10)}</span>
                       </div>
                       {/* Full fingerprint */}
@@ -1566,6 +1534,26 @@ export default function App() {
             </div>
           )}
 
+          {cert && !certError && cert.is_staging && (
+            <div className={`mt-4 rounded border px-3 py-2.5 text-[13px] font-mono ${
+              stagingDangerous
+                ? "border-[#f85149]/40 bg-[#f85149]/10 text-[#f85149]"
+                : "border-[#e3b341]/40 bg-[#e3b341]/10 text-[#e3b341]"
+            }`}>
+              <div className="flex items-center gap-1.5 mb-1 font-semibold">
+                <AlertCircle size={13} />
+                <span>Test/staging certificate detected</span>
+              </div>
+              <div className="opacity-90 leading-relaxed">
+                A Let's Encrypt STAGING (untrusted) certificate is currently loaded at{" "}
+                <span className="font-semibold">{cert.cert_path}</span>.
+                {stagingDangerous
+                  ? " Auto-deploy is paused until a valid certificate is issued — no device will receive this certificate automatically."
+                  : " This certificate will not be trusted by browsers or devices — nothing will auto-deploy while auto-deploy stays off."}
+              </div>
+            </div>
+          )}
+
           {cert && !certError && (
             <div className="mt-4 pt-4 border-t border-[#21262d]">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-3">
@@ -1581,7 +1569,7 @@ export default function App() {
                 ].map(({ label, value, mono }) => (
                   <div key={label}>
                     <p className="font-mono text-[13px] text-[#484f58] uppercase tracking-wider mb-0.5">{label}</p>
-                    <p className={`text-[14px] text-[#39d353] truncate ${mono ? "font-mono" : ""}`} title={value}>{value}</p>
+                    <p className={`text-[14px] truncate ${mono ? "font-mono" : ""} ${label === "Root CA" && cert.is_staging ? "text-[#e3b341]" : "text-[#39d353]"}`} title={value}>{value}</p>
                   </div>
                 ))}
               </div>
