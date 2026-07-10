@@ -237,3 +237,68 @@ def probe_tls_serial(host: str, port: int = 443, legacy: bool = False) -> str:
             der = ssock.getpeercert(binary_form=True)
     cert = x509.load_der_x509_certificate(der)
     return _serial_hex(cert)
+
+
+def probe_tls_names(host: str, port: int = 443, legacy: bool = False) -> list[str]:
+    """Connect to host:port and return the CN + SAN DNS names + SAN IP
+    addresses of the currently-served certificate, all as strings.
+
+    IP SANs matter here specifically — self-signed certs on appliances
+    like Proxmox routinely include the box's own management IP as a SAN
+    (confirmed against a real device: 10.10.101.92 was in the IP SAN list
+    even though it's also literally how that device is configured as a
+    CertFleet target), and plenty of devices in this app are configured
+    by IP rather than hostname. Missing that would produce a false
+    "not covered" warning on exactly the devices most likely to be
+    configured that way.
+
+    Used for a coverage comparison (does the new cert cover everything the
+    device's *current* cert covers), not for hostname verification — this
+    app disables TLS hostname/cert-chain checking everywhere on purpose,
+    since most of these devices present internally-issued or self-signed
+    certs with names that were never going to validate against any public
+    CA trust store to begin with.
+    """
+    ctx = _tls_ctx(legacy)
+    with socket.create_connection((host, port), timeout=10) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+            der = ssock.getpeercert(binary_form=True)
+    cert = x509.load_der_x509_certificate(der)
+    names = set(_sans(cert))
+    try:
+        ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        names.update(str(ip) for ip in ext.value.get_values_for_type(x509.IPAddress))
+    except x509.ExtensionNotFound:
+        pass
+    cn_attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+    if cn_attrs:
+        names.add(cn_attrs[0].value)
+    return sorted(names)
+
+
+def hostname_matches(hostname: str, pattern: str) -> bool:
+    """RFC 6125-style single-label wildcard match.
+
+    "*.example.com" covers "foo.example.com" but deliberately NOT
+    "example.com" itself or "a.b.example.com" — a wildcard covers exactly
+    one label, same rule real browsers use. This is a coverage check, not
+    proof the hostname is "correct" in any absolute sense (see
+    hostname_covered_by_cert's docstring in main.py for why that's not a
+    thing this app can actually determine).
+    """
+    hostname = hostname.lower().rstrip(".")
+    pattern = pattern.lower().rstrip(".")
+    if pattern == hostname:
+        return True
+    if pattern.startswith("*."):
+        suffix = pattern[1:]  # ".example.com"
+        if not hostname.endswith(suffix):
+            return False
+        prefix = hostname[: -len(suffix)]
+        return len(prefix) > 0 and "." not in prefix
+    return False
+
+
+def hostname_covered(hostname: str, names: list[str]) -> bool:
+    """True if any name in `names` (CN/SAN list) covers `hostname`."""
+    return any(hostname_matches(hostname, n) for n in names)

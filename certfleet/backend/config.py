@@ -33,6 +33,7 @@ class DeviceConfig:
     delete_old_certs: bool = True
     verify_tls: bool = True
     pfsense_allow_upload: bool = False
+    proxmox_allow_upload: bool = False
     omadac_id: Optional[str] = None   # 32-char hex; auto-discovered if omitted
 
 
@@ -59,6 +60,7 @@ def load_devices(logger=None) -> list[DeviceConfig]:
             delete_old_certs=d.get("delete_old_certs", True),
             verify_tls=d.get("verify_tls", True),
             pfsense_allow_upload=d.get("pfsense_allow_upload", False),
+            proxmox_allow_upload=d.get("proxmox_allow_upload", False),
             omadac_id=d.get("omadac_id"),
         ))
     return devices

@@ -9,7 +9,7 @@ import {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type DeviceType = "truenas" | "brother" | "hubitat" | "comware" | "omada" | "pfsense";
+type DeviceType = "truenas" | "brother" | "hubitat" | "comware" | "omada" | "pfsense" | "proxmox";
 
 interface LocalCert {
   domain: string; issuer: string; not_before: string; not_after: string;
@@ -24,7 +24,8 @@ interface Device {
   running: boolean; last_run: string | null;
   last_status: "already_current" | "deployed" | "needs_deploy" | "skipped" | "no_local_cert" | "error" | null;
   last_message: string | null; live_fingerprint: string | null;
-  pfsense_allow_upload?: boolean;
+  last_warning: string | null;
+  pfsense_allow_upload?: boolean; proxmox_allow_upload?: boolean;
 }
 
 interface DeviceConfigEntry {
@@ -32,7 +33,7 @@ interface DeviceConfigEntry {
   port?: number; username?: string; password?: string; api_key?: string;
   site_id?: string; pki_domain?: string; ssl_policy?: string;
   startup_config_path?: string; verify_tls?: boolean;
-  pfsense_allow_upload?: boolean; omadac_id?: string;
+  pfsense_allow_upload?: boolean; proxmox_allow_upload?: boolean; omadac_id?: string;
   p12_password?: string; delete_old_certs?: boolean;
 }
 
@@ -57,6 +58,7 @@ const DEVICE_TYPES: { value: DeviceType; label: string; icon: string; defaultPor
   { value: "hubitat",  label: "Hubitat C-7",               icon: "🏠", defaultPort: 443, namePlaceholder: "My Hubitat"        },
   { value: "omada",    label: "TP-Link Omada OC200/OC300", icon: "📡", defaultPort: 443, namePlaceholder: "My Omada OC200"    },
   { value: "brother",  label: "Brother MFC Printer",       icon: "🖨️", defaultPort: 443, namePlaceholder: "My Brother Printer"},
+  { value: "proxmox",  label: "Proxmox VE",                icon: "🖥️", defaultPort: 8006, namePlaceholder: "My Proxmox Node"   },
 ];
 const DEVICE_TYPE_MAP = Object.fromEntries(DEVICE_TYPES.map(d => [d.value, d]));
 
@@ -67,6 +69,7 @@ const TYPE_FIELDS: Record<DeviceType, string[]> = {
   hubitat:  ["api_key", "port"],
   omada:    ["username", "password", "site_id", "omadac_id", "verify_tls"],
   brother:  ["password"],
+  proxmox:  ["username", "api_key", "site_id", "port", "proxmox_allow_upload"],
 };
 
 const BG_PRESETS = [
@@ -650,9 +653,9 @@ function SettingsPanel({
 
 const EMPTY_DEVICE: DeviceConfigEntry = {
   id: "", name: "", type: "truenas", enabled: true, host: "",
-  port: undefined, username: "", password: "", api_key: "", site_id: "Default",
+  port: undefined, username: "", password: "", api_key: "", site_id: "",
   pki_domain: "", ssl_policy: "", startup_config_path: "",
-  verify_tls: true, pfsense_allow_upload: false, omadac_id: "", p12_password: "",
+  verify_tls: true, pfsense_allow_upload: false, proxmox_allow_upload: false, omadac_id: "", p12_password: "",
   delete_old_certs: true,
 };
 
@@ -774,8 +777,14 @@ function DeviceModal({
           {fields.length > 0 && <div className="border-t border-[#21262d]" />}
 
           {fields.includes("username") && (
-            <FieldRow label="Username">
-              <TextInput value={dev.username ?? ""} onChange={v => set("username", v)} placeholder="admin" />
+            <FieldRow label={dev.type === "proxmox" ? "Token ID" : "Username"}>
+              <TextInput value={dev.username ?? ""} onChange={v => set("username", v)} mono={dev.type === "proxmox"}
+                placeholder={dev.type === "proxmox" ? "root@pam!CertFleetAuth" : "admin"} />
+              {dev.type === "proxmox" && (
+                <p className="font-mono text-[11px] text-[#484f58] mt-1">
+                  Full token ID from Datacenter → Permissions → API Tokens (user@realm!tokenname).
+                </p>
+              )}
             </FieldRow>
           )}
           {fields.includes("password") && (
@@ -784,9 +793,9 @@ function DeviceModal({
             </FieldRow>
           )}
           {fields.includes("api_key") && (
-            <FieldRow label={dev.type === "comware" ? "XTD CLI password" : "API key"}>
+            <FieldRow label={dev.type === "comware" ? "XTD CLI password" : dev.type === "proxmox" ? "Token secret" : "API key"}>
               <TextInput value={dev.api_key ?? ""} onChange={v => set("api_key", v)} password
-                placeholder={dev.type === "comware" ? "foes-bent-pile-atom-ship" : dev.type === "truenas" ? "TrueNAS API key" : "API key"} />
+                placeholder={dev.type === "comware" ? "foes-bent-pile-atom-ship" : dev.type === "truenas" ? "TrueNAS API key" : dev.type === "proxmox" ? "Token secret (UUID)" : "API key"} />
               {dev.type === "comware" && (
                 <p className="font-mono text-[11px] text-[#484f58] mt-1">
                   Default XTD-mode password: <span className="text-[#8b949e]">foes-bent-pile-atom-ship</span>
@@ -802,9 +811,15 @@ function DeviceModal({
             </FieldRow>
           )}
           {fields.includes("site_id") && (
-            <FieldRow label="Site name">
+            <FieldRow label={dev.type === "proxmox" ? "Node name" : "Site name"}>
               <TextInput value={dev.site_id ?? ""} onChange={v => set("site_id", v)} mono
-                placeholder="Default" />
+                placeholder={dev.type === "proxmox" ? "proxmoxdemo" : "Default"} />
+              {dev.type === "proxmox" && (
+                <p className="font-mono text-[11px] text-[#484f58] mt-1">
+                  The short node name as registered in the cluster — not the FQDN. Find it under
+                  Datacenter in the Proxmox web UI.
+                </p>
+              )}
             </FieldRow>
           )}
           {fields.includes("omadac_id") && (
@@ -876,6 +891,16 @@ function DeviceModal({
               </div>
             </FieldRow>
           )}
+          {fields.includes("proxmox_allow_upload") && (
+            <FieldRow label="Allow upload">
+              <div className="flex items-center gap-2 pt-1">
+                <Toggle checked={dev.proxmox_allow_upload ?? false} onChange={v => set("proxmox_allow_upload", v)} />
+                <span className="font-mono text-[14px] text-[#484f58]">
+                  {dev.proxmox_allow_upload ? "Upload enabled" : "Verify-only (Proxmox's own ACME client manages renewal)"}
+                </span>
+              </div>
+            </FieldRow>
+          )}
 
           <div className="border-t border-[#21262d]" />
           <FieldRow label="Device ID">
@@ -937,11 +962,24 @@ function DeviceCard({ device, localFp, onCheck, onDeploy, onBackup, onEdit, back
   const inSync    = !!(device.live_fingerprint && localFp && device.live_fingerprint === localFp);
   const hasFp     = !!(device.live_fingerprint && localFp);
   const isPfsense = device.type === "pfsense";
+  const isProxmox = device.type === "proxmox";
   const isOmada   = device.type === "omada";
   const typeInfo  = DEVICE_TYPE_MAP[device.type];
+  // pfSense and Proxmox both can defer cert renewal to their own built-in
+  // ACME client — the upload gate/label logic is identical for both,
+  // just with device-specific wording.
+  const hasUploadGate = isPfsense || isProxmox;
+  const uploadAllowed = isPfsense ? device.pfsense_allow_upload : isProxmox ? device.proxmox_allow_upload : undefined;
+  const acmeLabel = isPfsense ? "ACME handles renewal" : "Proxmox's own ACME client handles renewal";
+
+  const cardBorder = device.running
+    ? "border-[#1f6feb]/40"
+    : device.last_warning
+      ? "border-[#e3b341]/50"
+      : "border-[#21262d]";
 
   return (
-    <div className={`rounded border bg-card p-4 flex flex-col gap-3 transition-all ${device.running ? "border-[#1f6feb]/40" : "border-[#21262d]"}`}>
+    <div className={`rounded border bg-card p-4 flex flex-col gap-3 transition-all ${cardBorder}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-lg leading-none">{typeInfo?.icon ?? "📦"}</span>
@@ -963,6 +1001,18 @@ function DeviceCard({ device, localFp, onCheck, onDeploy, onBackup, onEdit, back
           )}
         </div>
       </div>
+
+      {device.last_warning && (
+        <div className="rounded border border-[#e3b341]/40 bg-[#e3b341]/10 px-3 py-2 text-[13px] font-mono text-[#e3b341]">
+          <div className="flex items-center gap-1.5 mb-1">
+            <AlertCircle size={11} />
+            <span className="text-[14px]">Heads up</span>
+          </div>
+          <div className="text-[13px] opacity-90 leading-relaxed">
+            {device.last_warning}
+          </div>
+        </div>
+      )}
 
       {hasFp && (
         <div className={`rounded border px-3 py-2 text-[13px] font-mono ${inSync ? "border-[#39d353]/20 bg-[#39d353]/5 text-[#39d353]" : "border-[#e3b341]/20 bg-[#e3b341]/5 text-[#e3b341]"}`}>
@@ -995,9 +1045,9 @@ function DeviceCard({ device, localFp, onCheck, onDeploy, onBackup, onEdit, back
           {formatLocalTime(device.last_run)}
         </p>
       )}
-      {isPfsense && (
+      {hasUploadGate && (
         <p className="text-[13px] text-[#8b949e] font-mono">
-          {device.pfsense_allow_upload ? "Upload enabled" : "Verify-only (ACME handles renewal)"}
+          {uploadAllowed ? "Upload enabled" : `Verify-only (${acmeLabel})`}
         </p>
       )}
 
@@ -1008,11 +1058,11 @@ function DeviceCard({ device, localFp, onCheck, onDeploy, onBackup, onEdit, back
           Verify
         </button>
         <button onClick={onDeploy}
-          disabled={device.running || !device.enabled || (isPfsense && !device.pfsense_allow_upload)}
-          title={isPfsense && !device.pfsense_allow_upload ? "pfsense_allow_upload must be enabled" : undefined}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded border text-[14px] font-mono disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${isPfsense && !device.pfsense_allow_upload ? "border-[#30363d] bg-transparent text-[#30363d]" : "border-[#39d353]/30 bg-[#39d353]/10 text-[#39d353] hover:bg-[#39d353]/20"}`}>
+          disabled={device.running || !device.enabled || (hasUploadGate && !uploadAllowed)}
+          title={hasUploadGate && !uploadAllowed ? "Allow upload must be enabled in the device editor" : undefined}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded border text-[14px] font-mono disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${hasUploadGate && !uploadAllowed ? "border-[#30363d] bg-transparent text-[#30363d]" : "border-[#39d353]/30 bg-[#39d353]/10 text-[#39d353] hover:bg-[#39d353]/20"}`}>
           {device.running ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-          {isPfsense && !device.pfsense_allow_upload ? "ACME" : "Deploy"}
+          {hasUploadGate && !uploadAllowed ? "ACME" : "Deploy"}
         </button>
       </div>
 

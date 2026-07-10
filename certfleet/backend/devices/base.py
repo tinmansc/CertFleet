@@ -24,6 +24,14 @@ class DeviceResult:
     message: str
     live_fingerprint: Optional[str] = None
     local_fingerprint: Optional[str] = None
+    # Non-fatal, "worth knowing about but didn't stop anything" info —
+    # e.g. a cert-coverage regression, an API token nearing expiry, a
+    # permission that's broader or narrower than it needs to be. Rendered
+    # distinctly (amber) from the pass/fail status, and safe to leave None
+    # for deployers that have nothing to report. main.py may also set or
+    # append to this centrally for checks that apply to every device type
+    # (like the cert-coverage comparison), not just device-specific ones.
+    warning: Optional[str] = None
 
 
 # A logger callable that device code uses — captured by the SSE event stream.

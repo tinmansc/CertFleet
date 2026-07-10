@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -20,15 +20,17 @@ from fastapi.staticfiles import StaticFiles
 
 import crypto_store
 import notify
-from cert_reader import read_local_cert
+from cert_reader import hostname_covered, probe_tls_names, read_local_cert
 from config import DeviceConfig, load_devices, OPTIONS_FILE
 from devices.base import DeployStatus, DeviceResult, Logger
+from devices.base import strip_scheme
 import devices.truenas as truenas
 import devices.brother as brother
 import devices.hubitat as hubitat
 import devices.comware as comware
 import devices.omada as omada
 import devices.pfsense as pfsense
+import devices.proxmox as proxmox
 
 
 # ── Event log (ring buffer, SSE) ──────────────────────────────────────────────
@@ -83,7 +85,9 @@ def _status_for(dev: DeviceConfig) -> dict:
         "last_status": s.get("last_status"),
         "last_message": s.get("last_message"),
         "live_fingerprint": s.get("live_fingerprint"),
+        "last_warning": s.get("last_warning"),
         "pfsense_allow_upload": getattr(dev, "pfsense_allow_upload", False),
+        "proxmox_allow_upload": getattr(dev, "proxmox_allow_upload", False),
     }
 
 
@@ -443,6 +447,62 @@ async def serve_spa(full_path: str = ""):
     return HTMLResponse("<h1>CertFleet</h1><p>Frontend not built yet.</p>")
 
 
+# ── Cert coverage check ───────────────────────────────────────────────────────
+#
+# There is no way to know, from inside this app, what hostname a browser
+# will actually type in to reach a given device — device.host is just
+# whatever address we use to connect to it, which is very often an
+# internal-only name or a bare IP, not the externally-meaningful one.
+# Reverse DNS doesn't solve this either (PTR records are frequently stale,
+# generic, or unset on internal networks). So this deliberately does NOT
+# try to determine "the right" hostname. Instead it checks two things we
+# CAN know with certainty:
+#   1. Regression: does the new cert cover everything the device's
+#      CURRENT live certificate already covers? This needs no DNS trust
+#      at all — we read both certs directly and compare. If the device is
+#      currently reachable under 4 names and the new cert only covers 1,
+#      that's real, unambiguous signal regardless of which name "really"
+#      matters.
+#   2. A hedged, best-effort note: is the configured device.host itself
+#      covered? Often it genuinely is the externally-meaningful name, so
+#      this has real value — but the message says plainly that it's just
+#      a heads-up based on configuration, not a verified fact.
+# Best-effort throughout: any probe failure here is swallowed silently —
+# this is a bonus safety net, not a requirement, and the device's own
+# check/deploy logic already handles real connectivity failures.
+def _check_cert_coverage(dev: DeviceConfig, local) -> Optional[str]:
+    if local is None:
+        return None
+
+    new_names = set(local.sans) | {local.domain}
+    hostname = strip_scheme(dev.host)
+    port = dev.port or 443
+    legacy = dev.type == "comware"
+
+    warnings = []
+
+    try:
+        live_names = probe_tls_names(hostname, port, legacy=legacy)
+        missing = sorted(n for n in live_names if not hostname_covered(n, new_names))
+        if missing:
+            warnings.append(
+                f"New certificate does not cover {', '.join(missing)}, which the device's "
+                f"current certificate does cover — access via those names may break."
+            )
+    except Exception:
+        pass  # best-effort only; the deployer's own probe already surfaces real connectivity issues
+
+    if not hostname_covered(hostname, new_names):
+        warnings.append(
+            f"Note: the configured hostname for this device ({hostname}) is not covered by "
+            f"the new certificate. This is only a heads-up based on how the device is set up "
+            f"here — if this is an internal-only address and the device is actually reached "
+            f"externally under a different name, this may not apply."
+        )
+
+    return " ".join(warnings) if warnings else None
+
+
 # ── Device dispatch ───────────────────────────────────────────────────────────
 
 _DEPLOYERS = {
@@ -452,6 +512,7 @@ _DEPLOYERS = {
     "comware": (comware.check, comware.deploy),
     "omada":   (omada.check,   omada.deploy),
     "pfsense": (pfsense.check, pfsense.deploy),
+    "proxmox": (proxmox.check, proxmox.deploy),
 }
 
 
@@ -498,11 +559,19 @@ async def _run_device(device_id: str, deploy: bool) -> dict:
             None, fn, dev, local, log
         )
 
+        coverage_warning = await asyncio.get_event_loop().run_in_executor(
+            None, _check_cert_coverage, dev, local
+        )
+        combined_warning = " ".join(w for w in (result.warning, coverage_warning) if w) or None
+        if combined_warning:
+            _emit("warn", f"{dev.name}: {combined_warning}", device_id)
+
         _device_status[device_id] = {
             "last_run": datetime.now(timezone.utc).isoformat(),
             "last_status": result.status.value,
             "last_message": result.message,
             "live_fingerprint": result.live_fingerprint,
+            "last_warning": combined_warning,
         }
         level = "success" if result.status != DeployStatus.ERROR else "error"
         _emit(level, f"{dev.name}: {result.message}", device_id)

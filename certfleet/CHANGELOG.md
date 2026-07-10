@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.0] — 2026-07-10
+
+### Added
+- **Proxmox VE support** (`devices/proxmox.py`) — official REST API, no SSH involved. Auth is an API token; reuses existing generic `DeviceConfig` columns rather than adding new schema (`username` holds the full token ID, `api_key` the token secret, `site_id` the Proxmox node name). Verified end-to-end against a real PVE 8.x node before shipping, including catching and fixing a wrong assumed API path (`/access/users/{userid}/tokens/{tokenid}` doesn't exist — the real one is singular, `/token/`) before it ever shipped.
+  - **"Allow upload" toggle** (`proxmox_allow_upload`, default off) — same posture as the existing pfSense deployer: Proxmox has its own built-in ACME client, so by default CertFleet only verifies and leaves upload disabled until explicitly turned on. The device card and Deploy button share the same generalized upload-gate logic pfSense already used, rather than duplicating it per device type.
+  - Fixed a real bug this surfaced: `site_id` (repurposed here as "Proxmox node name") was defaulting to the literal string `"Default"` in the Add Device form — harmless for Omada (which never actually reads `site_id` server-side — turned out to be dead code) but would have silently sent an invalid node name on every new Proxmox device.
+- **Certificate coverage check**, applied to all seven device types centrally in `main.py`, not per-deployer. There's no reliable way for this app to know what hostname a browser will actually use to reach a device — `device.host` is just whatever address reaches it internally, and reverse DNS doesn't resolve that uncertainty either. So instead of guessing at "the right" hostname, this checks something knowable with certainty: whether the new certificate covers everything the device's *current* live certificate already covers (a live TLS probe against the device, comparing CN + SAN + IP-SAN lists with real wildcard-matching rules, not substring matching). If coverage would regress, the device card turns amber with a "Heads up" note and the event log gets a `warn` entry — plus a second, honestly-hedged note if the configured `device.host` itself isn't covered, since that's often but not always the real answer.
+  - Caught and fixed a real false-positive risk during testing: the initial version only checked DNS-name SANs, missing IP-address SANs entirely — which would have produced an incorrect "not covered" warning on any device (like the real Proxmox box used to verify this) that's configured by IP and whose self-signed cert includes that same IP as a SAN.
+  - New generic `DeviceResult.warning` field (not Proxmox-specific) — reusable for any future non-fatal "worth knowing" signal from any deployer.
+
+---
+
 ## [1.1.0] — 2026-07-09
 
 ### Changed
