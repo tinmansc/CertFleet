@@ -84,6 +84,7 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
         log("error", f"Proxmox: {msg}")
         return DeviceResult(status=DeployStatus.ERROR, message=msg)
 
+    live_fp = None  # guaranteed defined even if an exception hits before the probe below
     try:
         log("info", f"Proxmox: probing TLS certificate on {hostname}:{port}")
         try:
@@ -161,7 +162,7 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
         body = e.read().decode(errors="replace")
         msg = f"Proxmox API error {e.code}: {body[:300]}"
         log("error", f"Proxmox: {msg}")
-        return DeviceResult(status=DeployStatus.ERROR, message=msg)
+        return DeviceResult(status=DeployStatus.ERROR, message=msg, live_fingerprint=live_fp)
     except Exception as exc:
         log("error", f"Proxmox: {exc}")
-        return DeviceResult(status=DeployStatus.ERROR, message=str(exc))
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc), live_fingerprint=live_fp)

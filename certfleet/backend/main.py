@@ -38,7 +38,16 @@ import devices.proxmox as proxmox
 MAX_LOG = 200
 _log_buffer: deque[dict] = deque(maxlen=MAX_LOG)
 _log_subscribers: list[asyncio.Queue] = []
-_log_counter = 0
+# Seeded from wall-clock time, not 0 — the frontend's "clear" boundary
+# (clearedBeforeId, App.tsx) is a raw comparison against this id that
+# persists in the browser tab across SSE reconnects. If the backend ever
+# restarts (a Rebuild, an update, a crash) with the counter reset to 0,
+# every new entry would get a low id again, colliding with a stale
+# threshold from before the restart and getting silently filtered out —
+# every device, indefinitely, until ids climbed back past the old high
+# water mark. Seeding from time instead guarantees a fresh boot's ids are
+# always higher than any previous boot's, so they can never collide.
+_log_counter = int(time.time() * 1000)
 
 
 def _emit(level: str, message: str, device_id: str | None = None):
@@ -89,51 +98,93 @@ def _note_cert_if_changed(local) -> bool:
     return not first_time
 
 
+# ── Notification dispatch (bell icon + optional Companion App push) ──────────
+#
+# HA realistically has exactly two channels that reach a person: the bell
+# icon (persistent_notification, always visible in HA's own UI but doesn't
+# push anywhere) and a Companion App push via notify.mobile_app_* (an actual
+# phone notification, if the user has the app installed and has picked a
+# target in Settings). No other notify.* integration is assumed or offered
+# — almost nobody has SMTP/Telegram/etc. wired into HA, so surfacing those
+# would just be UI clutter for an option nobody uses.
+#
+# Anything that can recur (a cert that's been unreadable for weeks, a
+# staging cert nobody's replaced) is throttled to at most once per 24h per
+# category — frequent enough that it won't be forgotten, infrequent enough
+# that it won't be tuned out. "Resolved" messages always fire immediately,
+# since confirming a problem cleared is the one thing worth not delaying.
+
+NOTIFY_MIN_INTERVAL_SECONDS = 24 * 60 * 60
+_last_notified_at: dict[str, datetime] = {}
+
+
+def _dispatch_notify(title: str, message: str, notification_id: str, cfg: dict) -> None:
+    if not cfg.get("notify_enabled", True):
+        return
+    notify.notify_ha(title, message, notification_id=notification_id)
+    target = cfg.get("notify_mobile_target")
+    if target:
+        notify.notify_mobile(target, title, message)
+
+
+def _notify_throttled(category: str, title: str, message: str, notification_id: str, cfg: dict) -> bool:
+    """Returns True if it actually sent, False if suppressed by the 24h
+    floor — callers use this to decide whether to also log the event, so
+    the event log doesn't get spammed every poll tick either."""
+    now = datetime.now(timezone.utc)
+    last = _last_notified_at.get(category)
+    if last is not None and (now - last).total_seconds() < NOTIFY_MIN_INTERVAL_SECONDS:
+        return False
+    _last_notified_at[category] = now
+    _dispatch_notify(title, message, notification_id, cfg)
+    return True
+
+
+def _notify_resolved(category: str, title: str, message: str, notification_id: str, cfg: dict) -> None:
+    _last_notified_at.pop(category, None)
+    _dispatch_notify(title, message, notification_id, cfg)
+
+
 # ── Staging/test certificate tracking ─────────────────────────────────────────
 
-STAGING_NOTIFY_INTERVAL_SECONDS = 24 * 60 * 60
 _staging_active = False
-_staging_last_notified: datetime | None = None
 
 
-def _check_staging(local, notify_enabled: bool) -> None:
+def _check_staging(local, cfg: dict) -> None:
     """Runs every poll tick (independent of whether the cert just changed) so
     a staging cert that sits loaded for days keeps getting flagged, not just
     once at the moment it first appeared — this is meant to reach someone who
     only glances at HA notifications occasionally, not just an open tab."""
-    global _staging_active, _staging_last_notified
+    global _staging_active
     if local is None:
         return
-    now = datetime.now(timezone.utc)
     if local.is_staging:
-        due = _staging_last_notified is None or \
-            (now - _staging_last_notified).total_seconds() >= STAGING_NOTIFY_INTERVAL_SECONDS
-        if due:
+        fired = _notify_throttled(
+            "staging",
+            "CertFleet — test/staging certificate active",
+            f"A Let's Encrypt STAGING (untrusted) certificate is currently loaded at "
+            f"{local.cert_path}. Auto-deploy is paused — devices will not receive this "
+            f"certificate until a valid one is issued.",
+            "certfleet_staging",
+            cfg,
+        )
+        if fired:
             _emit("warn", f"Test/staging certificate detected at {local.cert_path} — "
                            f"auto-deploy is paused until a valid certificate is issued")
-            if notify_enabled:
-                notify.notify_ha(
-                    "CertFleet — test/staging certificate active",
-                    f"A Let's Encrypt STAGING (untrusted) certificate is currently loaded at "
-                    f"{local.cert_path}. Auto-deploy is paused — devices will not receive this "
-                    f"certificate until a valid one is issued.",
-                    notification_id="certfleet_staging",
-                )
-            _staging_last_notified = now
         _staging_active = True
     else:
         if _staging_active:
             _emit("success", f"Valid certificate restored at {local.cert_path} — "
                                f"auto-deploy has resumed normal operation")
-            if notify_enabled:
-                notify.notify_ha(
-                    "CertFleet — valid certificate restored",
-                    f"The certificate at {local.cert_path} is no longer a staging/test "
-                    f"certificate. Auto-deploy has resumed normal operation.",
-                    notification_id="certfleet_staging",
-                )
+            _notify_resolved(
+                "staging",
+                "CertFleet — valid certificate restored",
+                f"The certificate at {local.cert_path} is no longer a staging/test "
+                f"certificate. Auto-deploy has resumed normal operation.",
+                "certfleet_staging",
+                cfg,
+            )
         _staging_active = False
-        _staging_last_notified = None
 
 
 # ── Server-side poll loop ─────────────────────────────────────────────────────
@@ -145,16 +196,14 @@ def _check_staging(local, notify_enabled: bool) -> None:
 CERT_FAIL_NOTIFY_THRESHOLD = 3
 DEFAULT_POLL_INTERVAL_MS = 900_000  # 15 min — matches the frontend's own default
 _cert_fail_streak = 0
-_cert_fail_notified = False
 _poller_task: asyncio.Task | None = None
 
 
 async def _poll_tick() -> None:
-    global _cert_fail_streak, _cert_fail_notified
+    global _cert_fail_streak
     from cert_reader import DEFAULT_CERT_PATH, DEFAULT_KEY_PATH  # noqa: PLC0415
 
     cfg = crypto_store.load_config(logger=_emit)
-    notify_enabled = cfg.get("notify_enabled", True)
     cert_path = cfg.get("cert_path") or DEFAULT_CERT_PATH
     key_path = cfg.get("key_path") or DEFAULT_KEY_PATH
 
@@ -162,32 +211,34 @@ async def _poll_tick() -> None:
         local = read_local_cert(cert_path, key_path)
     except Exception:
         _cert_fail_streak += 1
-        if _cert_fail_streak == CERT_FAIL_NOTIFY_THRESHOLD and not _cert_fail_notified:
-            _cert_fail_notified = True
-            _emit("warn", f"Certificate unreadable for {CERT_FAIL_NOTIFY_THRESHOLD} consecutive checks "
-                           f"({cert_path})")
-            if notify_enabled:
-                notify.notify_ha(
-                    "CertFleet — certificate unreadable",
-                    f"The local certificate file has failed to read for {CERT_FAIL_NOTIFY_THRESHOLD} "
-                    "consecutive checks. Check the cert paths in Settings.",
-                    notification_id="certfleet_cert_error",
-                )
+        if _cert_fail_streak >= CERT_FAIL_NOTIFY_THRESHOLD:
+            fired = _notify_throttled(
+                "cert_unreadable",
+                "CertFleet — certificate unreadable",
+                f"The local certificate file has failed to read for {_cert_fail_streak} "
+                "consecutive checks. Check the cert paths in Settings.",
+                "certfleet_cert_error",
+                cfg,
+            )
+            if fired:
+                _emit("warn", f"Certificate unreadable for {_cert_fail_streak} consecutive checks "
+                               f"({cert_path})")
         return
 
+    was_failing = _cert_fail_streak >= CERT_FAIL_NOTIFY_THRESHOLD
     _cert_fail_streak = 0
-    if _cert_fail_notified:
-        _cert_fail_notified = False
+    if was_failing:
         _emit("info", "Certificate readable again after a period of failure")
-        if notify_enabled:
-            notify.notify_ha(
-                "CertFleet — certificate readable again",
-                "The local certificate file is readable again after a period of failure.",
-                notification_id="certfleet_cert_error",
-            )
+        _notify_resolved(
+            "cert_unreadable",
+            "CertFleet — certificate readable again",
+            "The local certificate file is readable again after a period of failure.",
+            "certfleet_cert_error",
+            cfg,
+        )
 
     changed = _note_cert_if_changed(local)
-    _check_staging(local, notify_enabled)
+    _check_staging(local, cfg)
 
     if not changed:
         return
@@ -219,6 +270,7 @@ async def _poll_loop() -> None:
 _device_status: dict[str, dict] = {}   # id -> {status, last_run, last_result}
 _running: set[str] = set()
 _last_backup: dict[str, str] = {}      # device_id -> absolute path of last backup file
+_last_deploy_log: dict[str, str] = {}  # device_id -> absolute path of last Comware transcript
 
 
 def _status_for(dev: DeviceConfig) -> dict:
@@ -237,6 +289,7 @@ def _status_for(dev: DeviceConfig) -> dict:
         "last_warning": s.get("last_warning"),
         "pfsense_allow_upload": getattr(dev, "pfsense_allow_upload", False),
         "proxmox_allow_upload": getattr(dev, "proxmox_allow_upload", False),
+        "has_deploy_log": dev.id in _last_deploy_log,
     }
 
 
@@ -298,6 +351,22 @@ if STATIC.exists():
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
+    # Root-level files Vite copies from frontend/public/ (favicons, etc.) —
+    # NOT inside assets_dir, so without this they fall through to the SPA
+    # catch-all below and get index.html's HTML back instead of the actual
+    # file. Explicit routes here (not a "/" mount, which would also have to
+    # come before every /api/* route to avoid shadowing them) sidestep that
+    # entirely regardless of registration order.
+    for _root_asset in ("favicon-32.png", "favicon-64.png"):
+        _asset_path = STATIC / _root_asset
+        if _asset_path.exists():
+            app.add_api_route(
+                f"/{_root_asset}",
+                (lambda p=_asset_path: (lambda: FileResponse(p)))(),
+                methods=["GET"],
+                include_in_schema=False,
+            )
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -312,7 +381,14 @@ def get_config():
 
 @app.post("/api/config")
 def save_config(body: dict):
-    crypto_store.save_config(body)
+    try:
+        crypto_store.save_config(body)
+    except Exception as e:
+        # Previously unguarded — any failure here (disk full, read-only
+        # filesystem, a corrupted key) returned a bare 500 with nothing
+        # logged, so "why did my save fail" had no answer anywhere.
+        _emit("error", f"Device configuration save failed: {e}")
+        raise HTTPException(500, f"Save failed: {e}")
     _emit("info", "Device configuration saved")
     return {"ok": True}
 
@@ -363,16 +439,27 @@ def set_key(body: dict):
 
 @app.post("/api/notify")
 def notify_route(body: dict):
-    """Passthrough for client-detected conditions the frontend wants surfaced
-    in the HA UI (e.g. the local cert becoming unreadable for several
-    consecutive polls) — auto-triggered device deploy/check results are
-    notified directly from the backend instead, see deploy_all/check_all."""
-    ok = notify.notify_ha(
+    """Passthrough for any future client-detected condition the frontend
+    wants surfaced — nothing currently calls this (cert-health/staging/
+    deploy notifications all run server-side via the poll loop), kept for
+    forward compatibility. Goes through the same dual-channel dispatch as
+    everything else, respecting notify_enabled and the mobile target."""
+    cfg = crypto_store.load_config()
+    _dispatch_notify(
         body.get("title", "CertFleet"),
         body.get("message", ""),
         body.get("notification_id", "certfleet"),
+        cfg,
     )
-    return {"ok": ok}
+    return {"ok": True}
+
+
+@app.get("/api/notify/targets")
+def notify_targets():
+    """Companion App notify.mobile_app_* services currently registered in
+    HA, for the Settings dropdown. Best-effort — returns [] rather than
+    erroring if none exist or the Companion App isn't installed."""
+    return {"targets": notify.discover_mobile_targets()}
 
 
 @app.post("/api/verify-host")
@@ -510,13 +597,27 @@ async def download_latest_backup(device_id: str):
     )
 
 
-def _notify_deploy_summary(result_map: dict, triggered_by: str) -> None:
+@app.get("/api/devices/{device_id}/deploy-log")
+async def download_deploy_log(device_id: str):
+    """Download the full switch-session transcript from this device's most
+    recent check/deploy run (currently Comware only — see devices/comware.py)."""
+    path = _last_deploy_log.get(device_id)
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "No deploy log available — run a check or deploy first")
+    return FileResponse(
+        path,
+        media_type="text/plain",
+        filename=Path(path).name,
+    )
+
+
+def _notify_deploy_summary(result_map: dict, triggered_by: str, cfg: dict) -> None:
     """Send an HA notification summarizing an auto-triggered deploy run.
 
     Only called when auto=true (a cert renewal was detected, not a
     manual button click) — these are infrequent (every 60-90 days per
     device with Let's Encrypt) so there's no need to throttle or
-    deduplicate the way we do for the cert-read-failure alert below.
+    deduplicate the way we do for the cert-read-failure alert.
     """
     total = len(result_map)
     failed = [r for r in result_map.values() if r.get("last_status") == "error"]
@@ -527,19 +628,20 @@ def _notify_deploy_summary(result_map: dict, triggered_by: str) -> None:
     else:
         title = "CertFleet — deploy succeeded"
         message = f"Auto-deploy after {triggered_by}: all {total} device(s) updated successfully."
-    notify.notify_ha(title, message, notification_id="certfleet_deploy")
+    _dispatch_notify(title, message, "certfleet_deploy", cfg)
 
 
-def _notify_needs_deploy(result_map: dict, triggered_by: str) -> None:
+def _notify_needs_deploy(result_map: dict, triggered_by: str, cfg: dict) -> None:
     """Notify when a cert renewal was detected but auto-deploy is off —
     the user needs to know a manual deploy is now waiting on them."""
     needs = [r for r in result_map.values() if r.get("last_status") == "needs_deploy"]
     if needs:
-        notify.notify_ha(
+        _dispatch_notify(
             "CertFleet — certificate renewed",
             f"{triggered_by}. {len(needs)} device(s) need a manual deploy: "
             f"{', '.join(r['name'] for r in needs)}",
-            notification_id="certfleet_renewal",
+            "certfleet_renewal",
+            cfg,
         )
 
 
@@ -549,7 +651,8 @@ async def deploy_all(auto: bool = False):
     results = await asyncio.gather(*[_run_device(dev.id, deploy=True) for dev in enabled])
     result_map = dict(zip([dev.id for dev in enabled], results))
     if auto:
-        _notify_deploy_summary(result_map, triggered_by="a detected certificate renewal")
+        _notify_deploy_summary(result_map, triggered_by="a detected certificate renewal",
+                                cfg=crypto_store.load_config())
     return result_map
 
 
@@ -559,7 +662,8 @@ async def check_all(auto: bool = False):
     results = await asyncio.gather(*[_run_device(dev.id, deploy=False) for dev in enabled])
     result_map = dict(zip([dev.id for dev in enabled], results))
     if auto:
-        _notify_needs_deploy(result_map, triggered_by="A new certificate was detected")
+        _notify_needs_deploy(result_map, triggered_by="A new certificate was detected",
+                              cfg=crypto_store.load_config())
     return result_map
 
 
@@ -716,6 +820,8 @@ async def _run_device(device_id: str, deploy: bool) -> dict:
         result: DeviceResult = await asyncio.get_event_loop().run_in_executor(
             None, fn, dev, local, log
         )
+        if result.log_file:
+            _last_deploy_log[device_id] = result.log_file
 
         coverage_warning = await asyncio.get_event_loop().run_in_executor(
             None, _check_cert_coverage, dev, local

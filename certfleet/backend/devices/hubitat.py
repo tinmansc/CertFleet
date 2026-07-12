@@ -98,16 +98,24 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
     }
 
     log("info", f"Hubitat: running hubitat-cli certificate update against {host}")
-    result = subprocess.run(
-        [cli, "advanced", "certificate", "update",
-         f"--certificate-path={local.cert_path}",
-         f"--private-key-path={local.key_path}",
-         "-v", "1"],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            [cli, "advanced", "certificate", "update",
+             f"--certificate-path={local.cert_path}",
+             f"--private-key-path={local.key_path}",
+             "-v", "1"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        # Previously unguarded — a timeout or launch failure here propagated
+        # uncaught all the way past this device's own error handling, which
+        # (via asyncio.gather in deploy_all/check_all) could take the whole
+        # batch's response down with it, not just this one device.
+        log("error", f"Hubitat: {exc}")
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc), live_fingerprint=live_fp)
 
     combined = result.stdout + result.stderr
     for line in combined.splitlines():
@@ -117,7 +125,7 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
     if result.returncode != 0:
         msg = f"hubitat-cli exited {result.returncode}"
         log("error", f"Hubitat: {msg}")
-        return DeviceResult(status=DeployStatus.ERROR, message=msg)
+        return DeviceResult(status=DeployStatus.ERROR, message=msg, live_fingerprint=live_fp)
 
     if "skipping update" in combined.lower():
         log("info", "Hubitat: certificate already up to date — hub did not reboot")
@@ -136,5 +144,6 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
     return DeviceResult(
         status=DeployStatus.DEPLOYED,
         message="Certificate deployed — hub rebooted",
+        live_fingerprint=live_fp,  # last known fingerprint before the reboot was triggered
         local_fingerprint=local.fingerprint,
     )

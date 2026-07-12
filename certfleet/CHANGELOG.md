@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.4] — 2026-07-12
+
+### Added
+- **Notification settings** — HA notifications now cap at once per 24h per category (a cert that's been unreadable for weeks nags periodically instead of firing once and going silent forever). New "Push to mobile app" option in Settings, auto-discovering `notify.mobile_app_*` Companion App targets via HA's own API — no typing a service name, no offering integrations almost nobody has (email/Telegram/etc.). Every notification path (staging, cert-unreadable, deploy summaries) now goes through one shared dispatcher instead of each call site handling it inconsistently.
+- **HP Comware full switch-session transcript now saved to a file** (`/config/certfleet/logs/<device>.log`, overwritten per run) and downloadable from the device card, instead of piping every line of raw switch CLI output into the shared event log. Cut the event log from dozens of lines per run to 3-4, while keeping full diagnostic detail available — the specific real error (e.g. a Startup config field mismatch) is now surfaced directly in the summary instead of just "script exited 1."
+
+### Fixed
+- **A backend restart could silently kill the live event log for every device, indefinitely** — the "clear" fix from 1.3.1 compared new entries against a boundary id that persisted in the browser tab across SSE reconnects, but the backend's own id counter reset to 0 on every restart. If Clear had ever been clicked before a restart, every subsequent real entry would have an id below the stale boundary and get silently filtered — not a display glitch, an actually-dead event log, for every device, until real activity climbed back past the old high-water mark. Reproduced deterministically (100% of new entries dropped in a simulated restart-after-clear) and fixed by seeding the id counter from wall-clock time instead of 0, so a fresh boot's ids can never collide with a previous boot's. Verified against two real, separate backend restarts.
+- **`/api/config`'s save endpoint had no error handling at all** — any failure returned a bare 500 with nothing logged, so a failed settings save had no diagnostic trail anywhere. Now logs the actual reason to the event log.
+- HP Comware's startup-config safety check reworded to name the real cause (the device's Startup config field not matching what's actually on the switch) instead of a bare "expected X, got Y" that read like a cert deploy failure when the cert had actually already succeeded.
+- The "update available" link used HA's pre-2026.7 URL scheme (`/hassio/addon/<slug>/info`); the "add-ons → apps" rename changed the real path to `/config/app/<slug>/info`, not just the label.
+
+---
+
 ## [1.3.3] — 2026-07-11
 
 ### Fixed

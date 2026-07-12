@@ -26,6 +26,7 @@ interface Device {
   last_message: string | null; live_fingerprint: string | null;
   last_warning: string | null;
   pfsense_allow_upload?: boolean; proxmox_allow_upload?: boolean;
+  has_deploy_log?: boolean;
 }
 
 interface DeviceConfigEntry {
@@ -42,6 +43,7 @@ interface AppConfig {
   cert_path?: string;
   key_path?: string;
   notify_enabled?: boolean;
+  notify_mobile_target?: string;
   poll_interval_ms?: number;
   auto_deploy_on_renewal?: boolean;
 }
@@ -487,6 +489,7 @@ function SettingsPanel({
   onClose, bgColor, onBgColor, certPath, keyPath, onSavePaths,
   autoDeployOnRenewal, onAutoDeployToggle,
   notifyEnabled, onNotifyToggle, pollIntervalMs, onPollIntervalChange,
+  notifyMobileTarget, onNotifyMobileTargetChange, mobileTargets,
   appVersion,
 }: {
   onClose: () => void;
@@ -495,6 +498,8 @@ function SettingsPanel({
   onSavePaths: (cert: string, key: string) => Promise<boolean>;
   autoDeployOnRenewal: boolean; onAutoDeployToggle: (v: boolean) => Promise<boolean>;
   notifyEnabled: boolean; onNotifyToggle: (v: boolean) => Promise<boolean>;
+  notifyMobileTarget: string; onNotifyMobileTargetChange: (target: string) => Promise<boolean>;
+  mobileTargets: string[];
   pollIntervalMs: number; onPollIntervalChange: (ms: number) => Promise<boolean>;
   appVersion: string | null;
 }) {
@@ -502,7 +507,18 @@ function SettingsPanel({
   const [localKey,  setLocalKey]  = useState(keyPath);
   const [savingPaths, setSavingPaths]   = useState<"idle" | "ok" | "error">("idle");
   const [savingPoll, setSavingPoll]     = useState<"idle" | "ok" | "error">("idle");
+  const [savingMobile, setSavingMobile] = useState<"idle" | "ok" | "error">("idle");
   const ref = useRef<HTMLDivElement>(null);
+
+  const doNotifyMobileTargetChange = async (target: string) => {
+    setSavingMobile("idle");
+    const ok = await onNotifyMobileTargetChange(target);
+    setSavingMobile(ok ? "ok" : "error");
+    setTimeout(() => setSavingMobile("idle"), ok ? 900 : 2000);
+  };
+
+  const humanizeTarget = (t: string) =>
+    t.replace(/^mobile_app_/, "").replace(/_/g, " ");
 
   const doSavePaths = async () => {
     setSavingPaths("idle");
@@ -632,11 +648,51 @@ function SettingsPanel({
           <div>
             <p className="font-mono text-[14px] text-[#e6edf3]">Home Assistant notifications</p>
             <p className="font-mono text-[12px] text-[#484f58] mt-0.5">
-              Notify on auto-triggered deploy results and persistent cert-read failures
+              Notify on auto-triggered deploy results and ongoing problems (cert unreadable,
+              staging cert active). Ongoing issues repeat at most once every 24h — enough to
+              not be missed, not enough to be tuned out.
             </p>
           </div>
           <Toggle checked={notifyEnabled} onChange={onNotifyToggle} />
         </label>
+
+        <div className="mt-3 pt-3 border-t border-[#21262d]/60">
+          <p className="font-mono text-[14px] text-[#e6edf3] mb-0.5 flex items-center justify-between">
+            <span>Push to mobile app</span>
+            {savingMobile === "ok" && <span className="text-[#39d353] normal-case tracking-normal flex items-center gap-1 text-[12px]"><CheckCircle2 size={11} /> Saved</span>}
+            {savingMobile === "error" && <span className="text-[#f85149] normal-case tracking-normal flex items-center gap-1 text-[12px]"><AlertCircle size={11} /> Save failed</span>}
+          </p>
+          {mobileTargets.length === 0 ? (
+            <p className="font-mono text-[12px] text-[#484f58] mt-0.5">
+              No Home Assistant Companion App detected — the bell icon above still works,
+              but install the Companion App on your phone for actual push alerts on critical
+              failures.
+            </p>
+          ) : (
+            <>
+              <p className="font-mono text-[12px] text-[#484f58] mb-2">
+                Also push critical alerts (cert unreadable, all-devices-failing) to a phone,
+                not just the bell icon.
+              </p>
+              <div className="relative">
+                <select
+                  value={notifyMobileTarget}
+                  onChange={e => doNotifyMobileTargetChange(e.target.value)}
+                  disabled={!notifyEnabled}
+                  className={`w-full appearance-none bg-[#010409] border rounded px-3 py-2 font-mono text-[15px] text-[#e6edf3] focus:outline-none focus:border-[#58a6ff] transition-all duration-500 pr-8 disabled:opacity-40 ${
+                    savingMobile === "ok" ? "border-[#39d353]" : savingMobile === "error" ? "border-[#f85149]" : "border-[#30363d]"
+                  }`}
+                >
+                  <option value="">Off (bell icon only)</option>
+                  {mobileTargets.map(t => (
+                    <option key={t} value={t}>{humanizeTarget(t)}</option>
+                  ))}
+                </select>
+                <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#484f58] pointer-events-none" />
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       <EncryptionKeySection />
@@ -959,6 +1015,7 @@ function DeviceCard({ device, localFp, onCheck, onDeploy, onBackup, onEdit, back
   const isPfsense = device.type === "pfsense";
   const isProxmox = device.type === "proxmox";
   const isOmada   = device.type === "omada";
+  const isComware = device.type === "comware";
   const typeInfo  = DEVICE_TYPE_MAP[device.type];
   // pfSense and Proxmox both can defer cert renewal to their own built-in
   // ACME client — the upload gate/label logic is identical for both,
@@ -1083,6 +1140,17 @@ function DeviceCard({ device, localFp, onCheck, onDeploy, onBackup, onEdit, back
           )}
         </div>
       )}
+
+      {isComware && device.has_deploy_log && (
+        <div className="pt-1 border-t border-[#21262d]">
+          <a href={`./api/devices/${device.id}/deploy-log`} download
+            className="flex items-center justify-center gap-1.5 py-2 rounded border border-[#30363d] bg-[#161b27] text-[14px] font-mono text-[#8b949e] hover:text-[#c9d1d9] hover:border-[#8b949e] transition-colors"
+            title="Download the full switch-session log from the last run">
+            <Download size={12} />
+            Download full switch log
+          </a>
+        </div>
+      )}
     </div>
   );
 }
@@ -1119,6 +1187,8 @@ export default function App() {
   // setting now, and it has no access to the browser's localStorage.
   const [autoDeployOnRenewal, setAutoDeployOnRenewal] = useState(false);
   const [notifyEnabled,   setNotifyEnabled]   = useState(true);
+  const [notifyMobileTarget, setNotifyMobileTarget] = useState("");
+  const [mobileTargets, setMobileTargets]     = useState<string[]>([]);
   const [pollIntervalMs,  setPollIntervalMs]  = useState(DEFAULT_POLL_INTERVAL_MS);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [latestVersion,   setLatestVersion]   = useState<string | null>(null);
@@ -1164,6 +1234,7 @@ export default function App() {
         if (data.cert_path) setCertPath(data.cert_path);
         if (data.key_path)  setKeyPath(data.key_path);
         setNotifyEnabled(data.notify_enabled ?? true);
+        setNotifyMobileTarget(data.notify_mobile_target ?? "");
         setPollIntervalMs(data.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS);
         setAutoDeployOnRenewal(data.auto_deploy_on_renewal ?? false);
         setConfigError(null);
@@ -1207,6 +1278,14 @@ export default function App() {
     return ok;
   }, [saveConfig]);
 
+  const handleNotifyMobileTargetChange = useCallback(async (target: string): Promise<boolean> => {
+    const prev = notifyMobileTarget;
+    setNotifyMobileTarget(target);
+    const ok = await saveConfig({ notify_mobile_target: target });
+    if (!ok) setNotifyMobileTarget(prev);
+    return ok;
+  }, [saveConfig, notifyMobileTarget]);
+
   const handlePollIntervalChange = useCallback(async (ms: number): Promise<boolean> => {
     const prev = pollIntervalMs;
     setPollIntervalMs(ms);
@@ -1246,6 +1325,13 @@ export default function App() {
   }, [fetchDevices]);
 
   useEffect(() => { fetchCert(); fetchDevices(); fetchConfig(); }, [fetchCert, fetchDevices, fetchConfig]);
+
+  useEffect(() => {
+    fetch("./api/notify/targets")
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.targets) setMobileTargets(d.targets); })
+      .catch(() => null);
+  }, []);
 
   useEffect(() => {
     fetch("./api/supervisor/addon-info")
@@ -1391,7 +1477,7 @@ export default function App() {
               <span className="font-mono text-[13px] text-[#484f58] tracking-widest">v{appVersion ?? APP_VERSION_FALLBACK}</span>
               {updateAvailable && (
                 <a
-                  href="/hassio/addon/certfleet/info"
+                  href="/config/app/certfleet/info"
                   target="_parent"
                   title={latestVersion ? `v${latestVersion} available` : "Update available"}
                   className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[12px] font-mono font-semibold bg-[#9e6a03]/20 border border-[#9e6a03]/40 text-[#e3b341] hover:bg-[#9e6a03]/30 transition-colors"
@@ -1430,6 +1516,8 @@ export default function App() {
                   autoDeployOnRenewal={autoDeployOnRenewal}
                   onAutoDeployToggle={handleAutoDeployToggle}
                   notifyEnabled={notifyEnabled} onNotifyToggle={handleNotifyToggle}
+                  notifyMobileTarget={notifyMobileTarget} onNotifyMobileTargetChange={handleNotifyMobileTargetChange}
+                  mobileTargets={mobileTargets}
                   pollIntervalMs={pollIntervalMs} onPollIntervalChange={handlePollIntervalChange}
                   appVersion={appVersion}
                 />

@@ -369,6 +369,7 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
     port = cfg.port or 443
     omadac_id = getattr(cfg, "omadac_id", None) or None
 
+    live_fp = None  # guaranteed defined even if an exception hits before the probe below
     try:
         log("info", f"Omada: probing TLS cert on {hostname}:{port}")
         try:
@@ -460,4 +461,4 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
 
     except Exception as exc:
         log("error", f"Omada: {exc}")
-        return DeviceResult(status=DeployStatus.ERROR, message=str(exc))
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc), live_fingerprint=live_fp)

@@ -32,6 +32,12 @@ class DeviceResult:
     # append to this centrally for checks that apply to every device type
     # (like the cert-coverage comparison), not just device-specific ones.
     warning: Optional[str] = None
+    # Absolute path to a full-detail log file for this run, if the deployer
+    # wrote one (currently just Comware — the HPE script's raw switch
+    # session transcript is too verbose for the shared event log, but the
+    # detail has real diagnostic value, so it's kept on disk and made
+    # downloadable instead of discarded).
+    log_file: Optional[str] = None
 
 
 # A logger callable that device code uses — captured by the SSE event stream.

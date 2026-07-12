@@ -15,7 +15,7 @@ import urllib.error
 from pathlib import Path
 from typing import Optional
 
-from cert_reader import LocalCert, probe_tls_fingerprint, probe_tls_serial
+from cert_reader import LocalCert, probe_tls_fingerprint
 from config import DeviceConfig
 from devices.base import DeployStatus, DeviceResult, Logger, ensure_https, secure_key, strip_scheme
 
@@ -72,10 +72,13 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
     hostname = strip_scheme(host)
     port = cfg.port or 443
 
+    live_fp = None  # guaranteed defined even if an exception hits before the probe below
     try:
         log("info", f"pfSense: probing TLS certificate on {hostname}:{port}")
-        live_fp = probe_tls_fingerprint(hostname, port)
-        live_serial = probe_tls_serial(hostname, port)
+        try:
+            live_fp = probe_tls_fingerprint(hostname, port)
+        except Exception as e:
+            log("warn", f"pfSense: TLS probe failed ({e})")
 
         cred_note = ""
         if cfg.username and cfg.password:
@@ -120,7 +123,7 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
 
     except Exception as exc:
         log("error", f"pfSense: {exc}")
-        return DeviceResult(status=DeployStatus.ERROR, message=str(exc))
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc), live_fingerprint=live_fp)
 
 
 def _upload_via_api(
@@ -171,4 +174,4 @@ def _upload_via_api(
             "Ensure the pfSense API package is installed and credentials are correct."
         )
         log("error", f"pfSense: {msg}")
-        return DeviceResult(status=DeployStatus.ERROR, message=msg)
+        return DeviceResult(status=DeployStatus.ERROR, message=msg, live_fingerprint=live_fp)

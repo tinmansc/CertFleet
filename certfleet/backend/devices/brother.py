@@ -272,6 +272,15 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
     host = _resolve_base_url(cfg.host, log)
     hostname = strip_scheme(host)
 
+    # Probed independently of the printer login below — a TLS handshake
+    # needs no credentials, so it should still succeed (and get reported)
+    # even if the login fails.
+    try:
+        live_fp = probe_tls_fingerprint(hostname)
+    except Exception as e:
+        log("warn", f"Brother: TLS probe failed ({e})")
+        live_fp = None
+
     try:
         printer = BrotherPrinter(host, cfg.password or "", cfg.verify_tls, log)
         printer.login()
@@ -280,14 +289,10 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
             if deploy:
                 raise RuntimeError("No local certificate available to deploy")
             log("info", "Brother: connected and authenticated — no local certificate to compare")
-            try:
-                fp = probe_tls_fingerprint(hostname)
-            except Exception:
-                fp = None
             return DeviceResult(
                 status=DeployStatus.NO_LOCAL_CERT,
                 message="Connected — credentials OK (no local cert to compare)",
-                live_fingerprint=fp,
+                live_fingerprint=live_fp,
             )
 
         before = {idx: printer.view_cert_serial(idx) for idx in printer.list_cert_indexes()}
@@ -297,20 +302,15 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
             new_idx = sorted(matching)[-1]
             log("info", f"Brother: current cert already on printer at idx={new_idx}")
             if not deploy:
-                fp = probe_tls_fingerprint(hostname)
                 return DeviceResult(
                     status=DeployStatus.ALREADY_CURRENT,
                     message="Certificate current",
-                    live_fingerprint=fp,
+                    live_fingerprint=live_fp,
                     local_fingerprint=local.fingerprint,
                 )
         else:
             if not deploy:
                 log("info", "Brother: certificate differs (check-only mode)")
-                try:
-                    live_fp = probe_tls_fingerprint(hostname)
-                except Exception:
-                    live_fp = None
                 return DeviceResult(
                     status=DeployStatus.NEEDS_DEPLOY,
                     message="Certificate differs — deploy required",
@@ -369,4 +369,4 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, deploy: boo
 
     except Exception as exc:
         log("error", f"Brother: {exc}")
-        return DeviceResult(status=DeployStatus.ERROR, message=str(exc))
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc), live_fingerprint=live_fp)

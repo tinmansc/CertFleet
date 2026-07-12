@@ -20,6 +20,7 @@ Script lookup order:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,14 @@ from devices.base import DeployStatus, DeviceResult, Logger, strip_scheme
 _USER_SCRIPT    = "/config/scripts/deploy_cert_hpe_1950.py"
 _BUNDLED_SCRIPT = "/app/scripts/deploy_cert_hpe_1950.py"
 
+# The HPE script prints a full interactive-troubleshooting-style transcript
+# (raw switch CLI output, `display startup`, `dir flash:/pki`, etc.) — real
+# diagnostic value, but not something to pipe line-by-line into the shared
+# event log used by every other device. Kept on disk instead, one file per
+# device (overwritten each run — this is "what just happened," not a
+# history), downloadable from the device card.
+LOG_DIR = Path("/config/certfleet/logs")
+
 
 def _resolve_script(cfg: DeviceConfig) -> str:
     explicit = getattr(cfg, "comware_script_path", None)
@@ -44,6 +53,28 @@ def _resolve_script(cfg: DeviceConfig) -> str:
     if Path(_USER_SCRIPT).exists():
         return _USER_SCRIPT
     return _BUNDLED_SCRIPT
+
+
+def _safe_filename(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", name).strip("-")
+    return f"{safe or 'comware-device'}.log"
+
+
+def _write_transcript(cfg: DeviceConfig, output: str) -> str:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / _safe_filename(cfg.name)
+    path.write_text(output)
+    return str(path)
+
+
+def _extract_error_summary(output: str) -> Optional[str]:
+    """The script prints its own 'ERROR on <switch>: ...' line for anything
+    that actually went wrong — surfacing just that gives a specific, useful
+    error instead of only 'script exited 1'."""
+    for line in reversed(output.splitlines()):
+        if "ERROR on " in line:
+            return line.strip()
+    return None
 
 
 def check(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger) -> DeviceResult:
@@ -83,6 +114,8 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, mode: str) 
     }
 
     switches_tmp = None
+    live_fp = None  # guaranteed defined even if an exception hits before the TLS probe below
+    log_file = None  # guaranteed defined even if an exception hits before the script runs
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, prefix="comware_sw_"
@@ -90,8 +123,7 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, mode: str) 
             yaml.dump(switch_entry, f)
             switches_tmp = f.name
 
-        log("info", f"Comware [{cfg.name}]: using script {script}")
-        log("info", f"Comware [{cfg.name}]: host {hostname} (SSH + TLS)")
+        log("info", f"Comware [{cfg.name}]: checking current certificate via SSH")
 
         # TLS fingerprint probe (uses legacy ciphers for HP 1950)
         try:
@@ -99,10 +131,8 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, mode: str) 
             if local is not None:
                 match_str = "cert matches" if live_fp == local.fingerprint else "cert differs"
                 log("info", f"Comware [{cfg.name}]: TLS probe — {match_str}")
-            else:
-                log("info", f"Comware [{cfg.name}]: TLS probe OK (no local certificate to compare)")
         except Exception as e:
-            log("warn", f"Comware [{cfg.name}]: TLS probe failed ({e}), proceeding with script")
+            log("warn", f"Comware [{cfg.name}]: TLS probe failed ({e}), proceeding")
             live_fp = None
 
         if local is None and mode == "deploy":
@@ -122,16 +152,15 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, mode: str) 
                "--check" if mode == "check" else "--apply"]
 
         result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300)
-
-        for line in (result.stdout + result.stderr).splitlines():
-            if line.strip():
-                level = "error" if "error" in line.lower() else \
-                        "warn"  if "warn"  in line.lower() else "info"
-                log(level, f"Comware [{cfg.name}]: {line}")
+        combined_output = result.stdout + result.stderr
+        log_file = _write_transcript(cfg, combined_output)
+        log("info", f"Comware [{cfg.name}]: full switch session log saved — download it from this device's card")
 
         if result.returncode != 0:
-            msg = f"Script exited {result.returncode}"
-            return DeviceResult(status=DeployStatus.ERROR, message=msg)
+            summary = _extract_error_summary(combined_output) or f"Script exited {result.returncode}"
+            log("error", f"Comware [{cfg.name}]: {summary}")
+            return DeviceResult(status=DeployStatus.ERROR, message=summary,
+                                 live_fingerprint=live_fp, log_file=log_file)
 
         try:
             new_fp = probe_tls_fingerprint(hostname, port, legacy=True)
@@ -146,22 +175,25 @@ def _run(cfg: DeviceConfig, local: Optional[LocalCert], log: Logger, mode: str) 
             status = DeployStatus.ALREADY_CURRENT
         else:
             status = DeployStatus.NEEDS_DEPLOY
-        log("success", f"Comware [{cfg.name}]: complete")
+        log("success", f"Comware [{cfg.name}]: {'deployed' if mode == 'deploy' else 'verified'} successfully")
         return DeviceResult(
             status=status,
             message=f"{'Deployed' if mode == 'deploy' else 'Verified'} successfully"
                      + ("" if local is not None else " (no local cert to compare)"),
             live_fingerprint=new_fp,
             local_fingerprint=local.fingerprint if local is not None else None,
+            log_file=log_file,
         )
 
     except subprocess.TimeoutExpired:
         msg = "Script timed out after 300s"
         log("error", f"Comware [{cfg.name}]: {msg}")
-        return DeviceResult(status=DeployStatus.ERROR, message=msg)
+        return DeviceResult(status=DeployStatus.ERROR, message=msg,
+                             live_fingerprint=live_fp, log_file=log_file)
     except Exception as exc:
         log("error", f"Comware [{cfg.name}]: {exc}")
-        return DeviceResult(status=DeployStatus.ERROR, message=str(exc))
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc),
+                             live_fingerprint=live_fp, log_file=log_file)
     finally:
         if switches_tmp:
             Path(switches_tmp).unlink(missing_ok=True)

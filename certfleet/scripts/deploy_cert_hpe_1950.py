@@ -840,8 +840,12 @@ def verify_startup_config_readonly(sw, secrets):
 
         if next_startup != expected:
             raise DeployError(
-                f"Startup verification failed on {sw['name']}. "
-                f"Expected next main startup file {expected}, but switch reports {next_startup}."
+                f"The 'Startup config' field configured for {sw['name']} in CertFleet is "
+                f"{expected}, but the switch's actual next-boot startup file is {next_startup}. "
+                f"This isn't a certificate problem — the deploy itself may well have succeeded — "
+                f"it means the Startup config field for this device doesn't match what's really "
+                f"configured on the switch. Edit this device in CertFleet and set Startup config "
+                f"to {next_startup}, then re-run."
             )
 
         dir_out = cli.cmd(f"dir {expected}", allow_error=True)

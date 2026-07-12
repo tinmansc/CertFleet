@@ -1,6 +1,6 @@
 name: "CertFleet"
 description: "Unified Let's Encrypt certificate deployment dashboard for all your network devices."
-version: "1.3.3"
+version: "1.3.4"
 slug: "certfleet"
 init: false
 arch:

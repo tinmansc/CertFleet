@@ -91,6 +91,20 @@ def _run(cfg: DeviceConfig, local: LocalCert, log: Logger, deploy: bool) -> Devi
             log("warn", f"TrueNAS API warning: {msg}")
             return None
 
+    hostname = strip_scheme(host)
+
+    # Probed independently of the API key below — a TLS handshake needs no
+    # credentials, so this should still succeed (and get reported) even if
+    # the API key itself is wrong, missing, or revoked. Previously the API
+    # auth call ran first and any failure there skipped this entirely, so a
+    # bad API key meant "we probably could have told you the device's live
+    # cert info, but we bailed out before ever trying."
+    try:
+        live_fp = probe_tls_fingerprint(hostname)
+    except Exception as e:
+        log("warn", f"TrueNAS: TLS probe failed ({e})")
+        live_fp = None
+
     try:
         log("info", f"TrueNAS: checking current certificate at {host}")
         general = api("system/general")
@@ -110,20 +124,14 @@ def _run(cfg: DeviceConfig, local: LocalCert, log: Logger, deploy: bool) -> Devi
             detail = api(f"certificate/id/{current_id}")
             current_content = detail.get("certificate") if detail else None
 
-        hostname = strip_scheme(host)
-
         if local is None:
             if deploy:
                 raise RuntimeError("No local certificate available to deploy")
             log("info", "TrueNAS: connected and authenticated — no local certificate to compare")
-            try:
-                fp = probe_tls_fingerprint(hostname)
-            except Exception:
-                fp = None
             return DeviceResult(
                 status=DeployStatus.NO_LOCAL_CERT,
                 message="Connected — credentials OK (no local cert to compare)",
-                live_fingerprint=fp,
+                live_fingerprint=live_fp,
                 warning=key_warning,
             )
 
@@ -131,21 +139,16 @@ def _run(cfg: DeviceConfig, local: LocalCert, log: Logger, deploy: bool) -> Devi
 
         if current_content and current_content.strip() == local_content:
             log("info", "TrueNAS: certificate already matches — no update needed")
-            fp = probe_tls_fingerprint(hostname)
             return DeviceResult(
                 status=DeployStatus.ALREADY_CURRENT,
                 message="Certificate current",
-                live_fingerprint=fp,
+                live_fingerprint=live_fp,
                 local_fingerprint=local.fingerprint,
                 warning=key_warning,
             )
 
         if not deploy:
             log("info", "TrueNAS: certificate differs (check-only mode)")
-            try:
-                live_fp = probe_tls_fingerprint(hostname)
-            except Exception:
-                live_fp = None
             return DeviceResult(
                 status=DeployStatus.NEEDS_DEPLOY,
                 message="Certificate differs — deploy required",
@@ -197,4 +200,4 @@ def _run(cfg: DeviceConfig, local: LocalCert, log: Logger, deploy: bool) -> Devi
 
     except Exception as exc:
         log("error", f"TrueNAS: {exc}")
-        return DeviceResult(status=DeployStatus.ERROR, message=str(exc))
+        return DeviceResult(status=DeployStatus.ERROR, message=str(exc), live_fingerprint=live_fp)
