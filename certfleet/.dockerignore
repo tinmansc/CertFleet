@@ -1,0 +1,8 @@
+# Keep the build context small and make the frontend stage's `npm ci`
+# authoritative — never ship the host's node_modules or a stale dist into
+# the image (the Dockerfile's frontend stage builds dist fresh).
+frontend/node_modules
+frontend/dist
+**/__pycache__
+*.pyc
+.git

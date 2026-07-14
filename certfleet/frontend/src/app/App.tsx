@@ -9,7 +9,7 @@ import {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type DeviceType = "truenas" | "brother" | "hubitat" | "comware" | "omada" | "pfsense" | "proxmox";
+type DeviceType = "truenas" | "brother" | "hubitat" | "comware" | "omada" | "pfsense" | "proxmox" | "netdata";
 
 interface LocalCert {
   domain: string; issuer: string; not_before: string; not_after: string;
@@ -36,6 +36,8 @@ interface DeviceConfigEntry {
   startup_config_path?: string; verify_tls?: boolean;
   pfsense_allow_upload?: boolean; proxmox_allow_upload?: boolean; omadac_id?: string;
   p12_password?: string; delete_old_certs?: boolean;
+  ssh_host?: string; ssh_port?: number; ssh_username?: string;
+  ssh_private_key?: string; jail_name?: string;
 }
 
 interface AppConfig {
@@ -62,6 +64,7 @@ const DEVICE_TYPES: { value: DeviceType; label: string; icon: string; defaultPor
   { value: "omada",    label: "TP-Link Omada OC200/OC300", icon: "📡", defaultPort: 443, namePlaceholder: "My Omada OC200"    },
   { value: "brother",  label: "Brother MFC Printer",       icon: "🖨️", defaultPort: 443, namePlaceholder: "My Brother Printer"},
   { value: "proxmox",  label: "Proxmox VE",                icon: "🖥️", defaultPort: 8006, namePlaceholder: "My Proxmox Node"   },
+  { value: "netdata",  label: "Netdata (TrueNAS jail)",     icon: "📊", defaultPort: 19999, namePlaceholder: "My Netdata"       },
 ];
 const DEVICE_TYPE_MAP = Object.fromEntries(DEVICE_TYPES.map(d => [d.value, d]));
 
@@ -73,6 +76,7 @@ const TYPE_FIELDS: Record<DeviceType, string[]> = {
   omada:    ["username", "password", "site_id", "omadac_id", "verify_tls"],
   brother:  ["password"],
   proxmox:  ["username", "api_key", "site_id", "port", "proxmox_allow_upload"],
+  netdata:  ["port", "jail_name", "ssh_host", "ssh_port", "ssh_username", "ssh_private_key"],
 };
 
 const BG_PRESETS = [
@@ -261,6 +265,29 @@ function TextInput({ value, onChange, placeholder, password, mono }: {
           {show ? <EyeOff size={13} /> : <Eye size={13} />}
         </button>
       )}
+    </div>
+  );
+}
+
+function SecretTextArea({ value, onChange, placeholder }: {
+  value: string; onChange: (v: string) => void; placeholder?: string;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative flex">
+      <textarea
+        value={value ?? ""}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={4}
+        spellCheck={false}
+        style={!show ? { WebkitTextSecurity: "disc" } as React.CSSProperties : undefined}
+        className="flex-1 bg-[#010409] border border-[#30363d] rounded px-3 py-2 text-[14px] font-mono text-[#e6edf3] placeholder-[#484f58] focus:outline-none focus:border-[#58a6ff] transition-colors resize-y"
+      />
+      <button type="button" onClick={() => setShow(s => !s)}
+        className="absolute right-2.5 top-2 text-[#484f58] hover:text-[#8b949e]">
+        {show ? <EyeOff size={13} /> : <Eye size={13} />}
+      </button>
     </div>
   );
 }
@@ -708,6 +735,7 @@ const EMPTY_DEVICE: DeviceConfigEntry = {
   pki_domain: "", ssl_policy: "", startup_config_path: "",
   verify_tls: true, pfsense_allow_upload: false, proxmox_allow_upload: false, omadac_id: "", p12_password: "",
   delete_old_certs: true,
+  ssh_host: "", ssh_port: 22, ssh_username: "", ssh_private_key: "", jail_name: "",
 };
 
 function DeviceModal({
@@ -878,6 +906,39 @@ function DeviceModal({
               <TextInput value={dev.omadac_id ?? ""} onChange={v => set("omadac_id", v)} mono
                 placeholder="32-char hex — auto-discovered if blank" />
             </FieldRow>
+          )}
+          {fields.includes("jail_name") && (
+            <>
+              <p className="font-mono text-[12px] text-[#484f58] -mt-1">
+                "Hostname / IP" above is the jail's own dashboard address (for the TLS check) —
+                these fields are for reaching the TrueNAS host that owns the jail.
+              </p>
+              <FieldRow label="Jail name">
+                <TextInput value={dev.jail_name ?? ""} onChange={v => set("jail_name", v)} mono
+                  placeholder="netdata13" />
+              </FieldRow>
+              <FieldRow label="TrueNAS host">
+                <TextInput value={dev.ssh_host ?? ""} onChange={v => set("ssh_host", v)} mono
+                  placeholder="truenas.example.com" />
+              </FieldRow>
+              <FieldRow label="SSH port">
+                <TextInput value={dev.ssh_port?.toString() ?? ""} mono
+                  onChange={v => set("ssh_port", v ? parseInt(v) : undefined)}
+                  placeholder="22" />
+              </FieldRow>
+              <FieldRow label="SSH username">
+                <TextInput value={dev.ssh_username ?? ""} onChange={v => set("ssh_username", v)} mono
+                  placeholder="CCAI" />
+              </FieldRow>
+              <FieldRow label="SSH private key">
+                <SecretTextArea value={dev.ssh_private_key ?? ""} onChange={v => set("ssh_private_key", v)}
+                  placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n…"} />
+                <p className="font-mono text-[12px] text-[#484f58] mt-1">
+                  Dedicated key for this add-on — its public half must be in that user's
+                  authorized_keys on the TrueNAS host, with passwordless sudo for iocage.
+                </p>
+              </FieldRow>
+            </>
           )}
           {/* Comware advanced settings — collapsed by default */}
           {dev.type === "comware" && (

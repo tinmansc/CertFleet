@@ -1,6 +1,6 @@
 name: "CertFleet"
 description: "Unified Let's Encrypt certificate deployment dashboard for all your network devices."
-version: "1.3.4"
+version: "1.4.0"
 slug: "certfleet"
 init: false
 arch:
@@ -18,7 +18,12 @@ schema: {}
 
 url: "https://github.com/tinmansc/CertFleet"
 
-image: ghcr.io/tinmansc/certfleet
+# image: ghcr.io/tinmansc/certfleet
+# ^ Commented out so Home Assistant builds this add-on LOCALLY from the
+#   Dockerfile (self-contained: it builds the frontend too). With this line
+#   present the Supervisor pulls the pre-built image instead of building.
+#   Re-enable it when distributing a pre-built multi-arch image (e.g. the
+#   GitHub Actions build publishing to ghcr.io) rather than local builds.
 
 map:
   - ssl:ro

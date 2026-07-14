@@ -31,6 +31,7 @@ import devices.comware as comware
 import devices.omada as omada
 import devices.pfsense as pfsense
 import devices.proxmox as proxmox
+import devices.netdata as netdata
 
 
 # ── Event log (ring buffer, SSE) ──────────────────────────────────────────────
@@ -775,6 +776,7 @@ _DEPLOYERS = {
     "omada":   (omada.check,   omada.deploy),
     "pfsense": (pfsense.check, pfsense.deploy),
     "proxmox": (proxmox.check, proxmox.deploy),
+    "netdata": (netdata.check, netdata.deploy),
 }
 
 

@@ -38,6 +38,8 @@ On first launch the dashboard will be empty. Click **Add Device** and fill in th
 - **HPE Comware 7** — HPE 1950 series switches via SSH (tested on 1950; likely works on any Comware 7 switch)
 - **TP-Link Omada** — OC200 / OC300 controllers
 - **pfSense** — pfSense firewalls via REST API
+- **Proxmox VE** — Proxmox nodes via API token
+- **Netdata** — Netdata dashboards running in a FreeBSD jail on TrueNAS, updated over SSH (`iocage exec` into the jail, cert files written into `ssl/`, `netdata` service restarted). Requires SSH access to the TrueNAS host with passwordless sudo for `iocage`, and a private key pasted into the device editor.
 
 ## SSL certificate path
 

@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.0] — 2026-07-12
+
+### Added
+- **Netdata device type** — deploys the local Let's Encrypt cert to a Netdata dashboard running in a FreeBSD jail on TrueNAS. Netdata (v2.6.3 here) has no cert-update API, so the deployer reaches the TrueNAS host over SSH, writes `cert.pem`/`key.pem` into the jail's `/usr/local/etc/netdata/ssl/` via `iocage exec`, adds the `^SSL=optional` suffix to `netdata.conf`'s `bind to` line if missing, and restarts **only** the `netdata` service (never the whole jail — jails can host multiple services). New shared `devices/jail_ssh.py` primitive (SSH connect / jail-exec / write-file-in-jail / scoped service restart) is written to be reused by the Grafana/InfluxDB/GitLab jail device types coming next. SSH auth uses a per-device private key pasted into the device editor, encrypted at rest with every other secret.
+
+### Changed
+- **Dockerfile now builds the frontend itself** (multi-stage: a Node stage compiles the Vite app, the runtime stage copies the result). A fresh git clone has no `frontend/dist` (it's gitignored), so this lets Home Assistant's Supervisor build the add-on **locally from source** with no pre-build step. Added `.dockerignore` to keep the host's `node_modules`/`dist` out of the build context. Verified end-to-end with a real local `docker build` against the HA amd64 base image.
+- **`image:` line in `config.yaml` commented out** so the add-on builds locally by default. Re-enable it to distribute a pre-built image (e.g. the GitHub Actions ghcr.io build) instead.
+
+---
+
 ## [1.3.4] — 2026-07-12
 
 ### Added

@@ -17,7 +17,7 @@ OPTIONS_FILE = crypto_store.CONFIG_FILE
 class DeviceConfig:
     id: str
     name: str
-    type: str          # truenas | brother | hubitat | comware | omada | pfsense
+    type: str          # truenas | brother | hubitat | comware | omada | pfsense | netdata
     enabled: bool
     host: str
     port: Optional[int] = None
@@ -35,6 +35,14 @@ class DeviceConfig:
     pfsense_allow_upload: bool = False
     proxmox_allow_upload: bool = False
     omadac_id: Optional[str] = None   # 32-char hex; auto-discovered if omitted
+    # Jail-hosted devices (netdata, and future grafana/influxdb/gitlab types) —
+    # `host`/`port` above stay the TLS-probe target (the jail's own dashboard
+    # address), these are for reaching the TrueNAS host that owns the jail.
+    ssh_host: Optional[str] = None
+    ssh_port: int = 22
+    ssh_username: Optional[str] = None
+    ssh_private_key: Optional[str] = None   # unencrypted PEM, pasted in device editor
+    jail_name: Optional[str] = None
 
 
 def load_devices(logger=None) -> list[DeviceConfig]:
@@ -62,5 +70,10 @@ def load_devices(logger=None) -> list[DeviceConfig]:
             pfsense_allow_upload=d.get("pfsense_allow_upload", False),
             proxmox_allow_upload=d.get("proxmox_allow_upload", False),
             omadac_id=d.get("omadac_id"),
+            ssh_host=d.get("ssh_host"),
+            ssh_port=d.get("ssh_port", 22),
+            ssh_username=d.get("ssh_username"),
+            ssh_private_key=d.get("ssh_private_key"),
+            jail_name=d.get("jail_name"),
         ))
     return devices
