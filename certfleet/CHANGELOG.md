@@ -31,7 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.3.1] — 2026-07-10 — "the vibe coding apocalypse where Dave realized he should ask more questions"
+## [1.3.1] — 2026-07-10 — "the vibe coding apocalypse where Dave realized he should not just ask more questions, but also read the code himself more than once"
 
 ### Added
 - **Staging/test Let's Encrypt certificate detection** (`is_staging` on `LocalCert`, `cert_reader.py`) — keyed off Let's Encrypt's own `"STAGING"` branding in the issuer/root CA CN, confirmed against real staging-issued certs. The top certificate card now turns amber when a staging cert is loaded, or red specifically when Auto-deploy is also on (the genuinely dangerous combination — a cert that would otherwise have been auto-pushed to every device). The Issuer and Root CA fields that tipped this off are recolored to match.
